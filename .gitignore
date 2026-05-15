@@ -1,0 +1,31 @@
+# Local reference files, maps, and generated outputs
+Docs/
+Maps/
+
+# StarCraft map/editor artifacts
+*.scm
+*.scx
+*.chk
+*.mpq
+*.tmp
+*.unprotected.*
+*.terrainfix.*
+
+# Downloaded tools and binaries
+*.exe
+*.dll
+*.zip
+*.7z
+*.rar
+
+# Logs and local editor/OS files
+*.log
+Desktop.ini
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
+Tools/Downloaded/
+Tools/UnusedUnprotector/
+Tools/ScmDraft/
+Tools/MPQEditor/
