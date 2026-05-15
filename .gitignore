@@ -25,7 +25,4 @@ Thumbs.db
 .DS_Store
 .vscode/
 .idea/
-Tools/Downloaded/
-Tools/UnusedUnprotector/
-Tools/ScmDraft/
-Tools/MPQEditor/
+Tools/
