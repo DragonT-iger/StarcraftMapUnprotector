@@ -291,7 +291,8 @@ internal static partial class StarcraftMapUnprotector
             return;
         }
 
-        var kept = new List<byte>();
+        byte[] kept = new byte[data.Length];
+        int keptLength = 0;
         for (int pos = 0; pos < data.Length; pos += 36)
         {
             bool allFF = true;
@@ -313,10 +314,13 @@ internal static partial class StarcraftMapUnprotector
                 continue;
             }
 
-            kept.AddRange(data.Skip(pos).Take(36));
+            Buffer.BlockCopy(data, pos, kept, keptLength, 36);
+            keptLength += 36;
         }
 
-        list[0] = kept.ToArray();
+        byte[] trimmed = new byte[keptLength];
+        Buffer.BlockCopy(kept, 0, trimmed, 0, keptLength);
+        list[0] = trimmed;
     }
 
     private static void RemoveFakeTriggerRecords(Dictionary<string, List<byte[]>> grouped, Stats stats)
@@ -333,7 +337,8 @@ internal static partial class StarcraftMapUnprotector
             return;
         }
 
-        var kept = new List<byte>(data.Length);
+        byte[] kept = new byte[data.Length];
+        int keptLength = 0;
         for (int pos = 0; pos < data.Length; pos += 2400)
         {
             if (LooksLikeFakeTrigger(data, pos))
@@ -342,10 +347,13 @@ internal static partial class StarcraftMapUnprotector
                 continue;
             }
 
-            kept.AddRange(data.Skip(pos).Take(2400));
+            Buffer.BlockCopy(data, pos, kept, keptLength, 2400);
+            keptLength += 2400;
         }
 
-        list[0] = kept.ToArray();
+        byte[] trimmed = new byte[keptLength];
+        Buffer.BlockCopy(kept, 0, trimmed, 0, keptLength);
+        list[0] = trimmed;
     }
 
     private static bool LooksLikeFakeTrigger(byte[] data, int offset)
