@@ -13,21 +13,22 @@ Windows용 실행 파일은 GitHub Releases에서 받을 수 있습니다.
 
 1. zip 파일의 압축을 풉니다.
 2. 언프로텍트할 원본 맵 파일을 `Maps\Originals` 폴더에 넣습니다.
-   - 지원 파일: `.scx`, `.scm`, `.tmp`
+   - 지원 파일: `.scx`, `.scm`
 3. `StarcraftMapUnprotector.exe`를 실행합니다.
 4. 변환된 파일은 `Maps\Outputs` 폴더에 생성됩니다.
 
 원본 파일은 덮어쓰지 않습니다. 중요한 맵은 그래도 별도로 백업해 둔 뒤 사용하는 것을 권장합니다.
 
-## 명령어 예시
+## 고급 사용
+
+파일을 직접 지정하거나 자동화 스크립트에서 사용할 때는 명령줄 인수를 활용할 수 있습니다.
 
 ```powershell
-StarcraftMapUnprotector.exe
-StarcraftMapUnprotector.exe --no-pause
+StarcraftMapUnprotector.exe input.scx output.scx
 StarcraftMapUnprotector.exe input.scx output.scx --no-pause
 ```
 
-`--no-pause` 옵션을 붙이면 작업이 끝난 뒤 Enter 입력을 기다리지 않고 바로 종료됩니다. 배치 파일이나 명령 프롬프트에서 자동으로 실행할 때 유용합니다.
+`--no-pause`를 붙이면 작업 완료 후 Enter 입력 없이 바로 종료됩니다.
 
 ## 사용 시 변질될 수 있는 정보
 

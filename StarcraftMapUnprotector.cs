@@ -134,7 +134,7 @@ internal static class StarcraftMapUnprotector
             Console.WriteLine("Usage: StarcraftMapUnprotector.exe <protected.scx|scm|scenario.chk> [output.scx]");
             Console.WriteLine("       StarcraftMapUnprotector.exe");
             Console.WriteLine();
-            Console.WriteLine("No arguments: unprotects every map-like file in Maps\\Originals to Maps\\Outputs.");
+            Console.WriteLine("No arguments: unprotects every .scx/.scm file in Maps\\Originals to Maps\\Outputs.");
             Console.WriteLine("Optional: add --no-pause to close immediately when finished.");
             return 0;
         }
@@ -175,7 +175,7 @@ internal static class StarcraftMapUnprotector
 
         Directory.CreateDirectory(outputDir);
 
-        string[] allowedExtensions = { ".scx", ".scm", ".tmp" };
+        string[] allowedExtensions = { ".scx", ".scm" };
         FileInfo[] maps = new DirectoryInfo(inputDir)
             .GetFiles()
             .Where(file => allowedExtensions.Contains(file.Extension, StringComparer.OrdinalIgnoreCase))
