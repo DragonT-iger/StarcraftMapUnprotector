@@ -96,7 +96,7 @@ internal static partial class StarcraftMapUnprotector
             return result;
         }
 
-        string text = Encoding.Default.GetString(listfile);
+        string text = Encoding.GetEncoding(949).GetString(listfile);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (string rawLine in text.Replace("\r", "\n").Split('\n'))
@@ -169,8 +169,9 @@ internal static partial class StarcraftMapUnprotector
 
         foreach (MpqHeaderCandidate header in headers)
         {
-            List<int> hashCandidates = BuildTableOffsetCandidates(file.Length, header.BaseOffset, header.HashTableOffset, header.HashCount);
-            List<int> blockCandidates = BuildTableOffsetCandidates(file.Length, header.BaseOffset, header.BlockTableOffset, header.BlockCount);
+            List<int> hashCandidates = FindHashTableByPattern(file, header.BaseOffset + 32, header.HashCount);
+            AddFixedHashCandidates(hashCandidates, file.Length, header.BaseOffset, header.HashTableOffset, header.HashCount);
+            hashCandidates = hashCandidates.Distinct().ToList();
 
             foreach (int hashOffset in hashCandidates)
             {
@@ -191,8 +192,7 @@ internal static partial class StarcraftMapUnprotector
                 }
 
                 sawScenarioHash = true;
-                int afterHash = hashOffset + header.HashCount * 16;
-                AddCandidateOffset(blockCandidates, afterHash, header.BlockCount * 16, file.Length);
+                List<int> blockCandidates = BuildAdjacentBlockCandidates(file, hashOffset, header.HashCount, header.BlockTableOffset, header.BlockCount, header.BaseOffset);
 
                 foreach (int blockOffset in blockCandidates)
                 {
@@ -268,10 +268,51 @@ internal static partial class StarcraftMapUnprotector
             reason = "recovered data did not look like CHK";
         }
 
+        byte[] rawChk = TryScanRawChk(file);
+        if (rawChk != null)
+        {
+            stats.MpqDeepRecoveryUsed++;
+            stats.MpqDeepRecoveryDetail = "raw CHK scan succeeded";
+            return rawChk;
+        }
+
         stats.MpqDeepRecoveryDetail =
             "deep recovery failed: " + reason +
             ", headers=" + headers.Count +
             ", tableCandidates=" + stats.MpqDeepTableCandidatesTried;
+        return null;
+    }
+
+    private static byte[] TryScanRawChk(byte[] file)
+    {
+        for (int pos = 0; pos + 8 <= file.Length; pos += 4)
+        {
+            string name = Encoding.ASCII.GetString(file, pos, 4);
+            if (!IsPlausibleSectionName(name))
+            {
+                continue;
+            }
+
+            uint size32 = BitConverter.ToUInt32(file, pos + 4);
+            if (size32 > 64 * 1024 * 1024)
+            {
+                continue;
+            }
+
+            int size = (int)size32;
+            if (pos + 8 + size > file.Length)
+            {
+                continue;
+            }
+
+            byte[] candidate = new byte[file.Length - pos];
+            Buffer.BlockCopy(file, pos, candidate, 0, candidate.Length);
+            if (LooksLikeChk(candidate) && ParseChk(candidate).Count >= 3)
+            {
+                return candidate;
+            }
+        }
+
         return null;
     }
 
@@ -342,42 +383,6 @@ internal static partial class StarcraftMapUnprotector
         }
 
         return result;
-    }
-
-    private static List<int> BuildTableOffsetCandidates(int fileLength, int headerBase, uint tableOffset, int entryCount)
-    {
-        int tableLength = entryCount * 16;
-        var candidates = new List<int>();
-        if (tableLength <= 0 || tableLength > fileLength)
-        {
-            return candidates;
-        }
-
-        long relative = tableOffset;
-        long absolute = headerBase + relative;
-        AddCandidateOffset(candidates, absolute, tableLength, fileLength);
-        AddCandidateOffset(candidates, absolute - 256, tableLength, fileLength);
-        AddCandidateOffset(candidates, absolute - 512, tableLength, fileLength);
-        AddCandidateOffset(candidates, absolute - 1024, tableLength, fileLength);
-        AddCandidateOffset(candidates, relative, tableLength, fileLength);
-        AddCandidateOffset(candidates, relative - 256, tableLength, fileLength);
-        AddCandidateOffset(candidates, relative - 512, tableLength, fileLength);
-        AddCandidateOffset(candidates, relative - 1024, tableLength, fileLength);
-
-        int tailStart = Math.Max(32, fileLength - 262144);
-        for (int offset = tailStart; offset + tableLength <= fileLength; offset += 4)
-        {
-            AddCandidateOffset(candidates, offset, tableLength, fileLength);
-        }
-
-        int windowStart = (int)Math.Max(32, absolute - 8192);
-        int windowEnd = (int)Math.Min(fileLength - tableLength, absolute + 8192);
-        for (int offset = windowStart; offset <= windowEnd; offset += 4)
-        {
-            AddCandidateOffset(candidates, offset, tableLength, fileLength);
-        }
-
-        return candidates.Distinct().ToList();
     }
 
     private static void AddCandidateOffset(List<int> candidates, long offset, int length, int fileLength)
@@ -777,5 +782,188 @@ internal static partial class StarcraftMapUnprotector
         }
 
         return maxOffset > 0 ? maxOffset : -1;
+    }
+
+    private static readonly uint[] CryptTable = BuildCryptTable();
+
+    private static uint[] BuildCryptTable()
+    {
+        var table = new uint[0x500];
+        uint seed = 0x00100001;
+        for (int i = 0; i < 0x100; i++)
+        {
+            int idx = i;
+            for (int j = 0; j < 5; j++)
+            {
+                seed = (seed * 125 + 3) % 0x2AAAAB;
+                uint t1 = (seed & 0xFFFF) << 16;
+                seed = (seed * 125 + 3) % 0x2AAAAB;
+                table[idx] = t1 | (seed & 0xFFFF);
+                idx += 0x100;
+            }
+        }
+
+        return table;
+    }
+
+    private static uint AdvanceSeed1(uint s1)
+    {
+        return ((~s1 << 21) + 0x11111111u) | (s1 >> 11);
+    }
+
+    private static uint AdvanceSeed1N(uint s1, int n)
+    {
+        for (int i = 0; i < n; i++)
+        {
+            s1 = AdvanceSeed1(s1);
+        }
+
+        return s1;
+    }
+
+    private static List<int> FindHashTableByPattern(byte[] file, int minOffset, int hashCount)
+    {
+        var results = new List<int>();
+        int tableBytes = hashCount * 16;
+        if (tableBytes <= 0 || tableBytes > file.Length)
+        {
+            return results;
+        }
+
+        uint nameA = Encryption.HashString("staredit\\scenario.chk", Encryption.HashType.Hash_Name_A);
+        uint nameB = Encryption.HashString("staredit\\scenario.chk", Encryption.HashType.Hash_Name_B);
+        uint hashKey = Encryption.HashString("(hash table)", Encryption.HashType.Hash_FileKey);
+
+        int j = (int)(nameA % (uint)hashCount);
+        int byteOffset = j * 16;
+
+        uint s1_j0 = AdvanceSeed1N(hashKey, j * 4);
+        uint s1_j1 = AdvanceSeed1(s1_j0);
+        uint ctEntry = CryptTable[0x400 + (s1_j1 & 0xFF)];
+
+        int maxStart = file.Length - tableBytes;
+        for (int p = Math.Max(minOffset, 0); p <= maxStart; p += 4)
+        {
+            int pos0 = p + byteOffset;
+            if (pos0 + 8 > file.Length)
+            {
+                continue;
+            }
+
+            uint C0 = BitConverter.ToUInt32(file, pos0);
+            uint C1 = BitConverter.ToUInt32(file, pos0 + 4);
+
+            uint s2m0 = (C0 ^ nameA) - s1_j0;
+            uint s2_next = nameA + s2m0 + (s2m0 << 5) + 3;
+            uint s2m1 = s2_next + ctEntry;
+
+            if (s1_j1 + s2m1 == (C1 ^ nameB))
+            {
+                results.Add(p);
+            }
+        }
+
+        return results;
+    }
+
+    private static void AddFixedHashCandidates(List<int> candidates, int fileLength, int headerBase, uint headerHashOffset, int hashCount)
+    {
+        int tableLength = hashCount * 16;
+        if (tableLength <= 0 || tableLength > fileLength)
+        {
+            return;
+        }
+
+        long relative = headerHashOffset;
+        long absolute = headerBase + relative;
+        AddCandidateOffset(candidates, absolute, tableLength, fileLength);
+        AddCandidateOffset(candidates, absolute - 256, tableLength, fileLength);
+        AddCandidateOffset(candidates, absolute - 512, tableLength, fileLength);
+        AddCandidateOffset(candidates, absolute - 1024, tableLength, fileLength);
+        AddCandidateOffset(candidates, relative, tableLength, fileLength);
+        AddCandidateOffset(candidates, relative - 256, tableLength, fileLength);
+        AddCandidateOffset(candidates, relative - 512, tableLength, fileLength);
+        AddCandidateOffset(candidates, relative - 1024, tableLength, fileLength);
+    }
+
+    private static List<int> BuildAdjacentBlockCandidates(byte[] file, int hashOffset, int hashCount, uint headerBlockOffset, int blockCount, int headerBase)
+    {
+        var candidates = new List<int>();
+        int tableLength = blockCount * 16;
+        if (tableLength <= 0 || tableLength > file.Length)
+        {
+            return candidates;
+        }
+
+        int adjacent = hashOffset + hashCount * 16;
+        AddCandidateOffset(candidates, adjacent, tableLength, file.Length);
+        AddCandidateOffset(candidates, adjacent + 16, tableLength, file.Length);
+        AddCandidateOffset(candidates, adjacent - 16, tableLength, file.Length);
+
+        long relative = headerBlockOffset;
+        long absolute = headerBase + relative;
+        AddCandidateOffset(candidates, absolute, tableLength, file.Length);
+        AddCandidateOffset(candidates, absolute - 256, tableLength, file.Length);
+        AddCandidateOffset(candidates, absolute - 512, tableLength, file.Length);
+        AddCandidateOffset(candidates, absolute - 1024, tableLength, file.Length);
+        AddCandidateOffset(candidates, relative, tableLength, file.Length);
+        AddCandidateOffset(candidates, relative - 256, tableLength, file.Length);
+        AddCandidateOffset(candidates, relative - 512, tableLength, file.Length);
+        AddCandidateOffset(candidates, relative - 1024, tableLength, file.Length);
+
+        List<int> pattern = FindBlockTableByPattern(file, headerBase + 32, blockCount);
+        foreach (int p in pattern)
+        {
+            AddCandidateOffset(candidates, p, tableLength, file.Length);
+        }
+
+        return candidates.Distinct().ToList();
+    }
+
+    private static List<int> FindBlockTableByPattern(byte[] file, int minOffset, int blockCount)
+    {
+        var results = new List<int>();
+        int tableBytes = blockCount * 16;
+        if (tableBytes <= 0 || tableBytes > file.Length)
+        {
+            return results;
+        }
+
+        uint blockKey = Encryption.HashString("(block table)", Encryption.HashType.Hash_FileKey);
+
+        // seed2 starts at 0xEEEEEEEE — fully known for the first entry
+        uint s1_0 = blockKey;
+        uint s2m_0 = 0xEEEEEEEEu + CryptTable[0x400 + (s1_0 & 0xFF)];
+        uint xorKey_0 = s1_0 + s2m_0;
+
+        uint s1_1 = AdvanceSeed1(s1_0);
+
+        int maxStart = file.Length - tableBytes;
+        for (int p = Math.Max(minOffset, 0); p <= maxStart; p += 4)
+        {
+            if (p + 8 > file.Length)
+            {
+                break;
+            }
+
+            uint P0 = BitConverter.ToUInt32(file, p) ^ xorKey_0;
+            if (P0 >= (uint)file.Length)
+            {
+                continue;
+            }
+
+            uint s2_1 = P0 + s2m_0 + (s2m_0 << 5) + 3;
+            uint s2m_1 = s2_1 + CryptTable[0x400 + (s1_1 & 0xFF)];
+            uint P1 = BitConverter.ToUInt32(file, p + 4) ^ (s1_1 + s2m_1);
+
+            if (P1 == 0 || P1 > (uint)(file.Length - (int)P0))
+            {
+                continue;
+            }
+
+            results.Add(p);
+        }
+
+        return results;
     }
 }

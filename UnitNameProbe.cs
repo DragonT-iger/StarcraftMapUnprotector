@@ -64,7 +64,7 @@ internal static class UnitNameProbe
             end++;
         }
 
-        return Encoding.Default.GetString(str, offset, end - offset);
+        return Encoding.GetEncoding(949).GetString(str, offset, end - offset);
     }
 
     private static Dictionary<string, byte[]> Parse(byte[] chk)

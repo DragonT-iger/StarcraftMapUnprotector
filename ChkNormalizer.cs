@@ -136,7 +136,7 @@ internal static partial class StarcraftMapUnprotector
                 end++;
             }
 
-            strings[i] = Encoding.Default.GetString(str, offset, end - offset);
+            strings[i] = Encoding.GetEncoding(949).GetString(str, offset, end - offset);
         }
 
         return strings;
@@ -177,7 +177,7 @@ internal static partial class StarcraftMapUnprotector
                 end++;
             }
 
-            strings[i] = Encoding.Default.GetString(str, offset, end - offset);
+            strings[i] = Encoding.GetEncoding(949).GetString(str, offset, end - offset);
         }
 
         return strings;
@@ -456,7 +456,7 @@ internal static partial class StarcraftMapUnprotector
     private static byte[] BuildStringTable(IList<string> strings, int minimumCount)
     {
         using (var ms = new MemoryStream())
-        using (var writer = new BinaryWriter(ms, Encoding.Default))
+        using (var writer = new BinaryWriter(ms, Encoding.GetEncoding(949)))
         {
             int count = Math.Max(minimumCount, strings.Count);
             if (count > UInt16.MaxValue)
@@ -470,13 +470,13 @@ internal static partial class StarcraftMapUnprotector
             {
                 string value = i < strings.Count ? strings[i] ?? "" : "";
                 writer.Write((ushort)offset);
-                offset += Encoding.Default.GetByteCount(value) + 1;
+                offset += Encoding.GetEncoding(949).GetByteCount(value) + 1;
             }
 
             for (int i = 0; i < count; i++)
             {
                 string value = i < strings.Count ? strings[i] ?? "" : "";
-                writer.Write(Encoding.Default.GetBytes(value));
+                writer.Write(Encoding.GetEncoding(949).GetBytes(value));
                 writer.Write((byte)0);
             }
 
