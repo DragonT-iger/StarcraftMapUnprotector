@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -229,6 +230,20 @@ internal static partial class StarcraftMapUnprotector
 
                     sawReadableMpq = true;
 
+                    data = TryRecoverEncryptedScenarioChkByAlternateKeys(file, header, hashes, blocks, out extraFiles);
+                    if (data != null)
+                    {
+                        stats.MpqDeepRecoveryUsed++;
+                        stats.MpqDeepRecoveryDetail =
+                            "alternate encrypted CHK recovery succeeded" +
+                            ", headers=" + headers.Count +
+                            ", tableCandidates=" + stats.MpqDeepTableCandidatesTried +
+                            ", headerBase=0x" + header.BaseOffset.ToString("X") +
+                            ", hash=0x" + hashOffset.ToString("X") +
+                            ", block=0x" + blockOffset.ToString("X");
+                        return data;
+                    }
+
                     BlockTable[] adjustedBlocks = TryBuildBaseAdjustedBlocks(blocks, header.BaseOffset, file.Length - header.BaseOffset);
                     if (adjustedBlocks != null)
                     {
@@ -281,6 +296,529 @@ internal static partial class StarcraftMapUnprotector
             ", headers=" + headers.Count +
             ", tableCandidates=" + stats.MpqDeepTableCandidatesTried;
         return null;
+    }
+
+    private static byte[] TryRecoverEncryptedScenarioChkByAlternateKeys(
+        byte[] file,
+        MpqHeaderCandidate header,
+        HashTable[] hashes,
+        BlockTable[] blocks,
+        out List<MpqFileEntry> extraFiles)
+    {
+        extraFiles = new List<MpqFileEntry>();
+
+        int scenarioBlock = FindUsableScenarioBlock(hashes, blocks);
+        if (scenarioBlock < 0)
+        {
+            return null;
+        }
+
+        BlockTable block = blocks[scenarioBlock];
+        int archiveLength = file.Length - header.BaseOffset;
+        if (!IsBlockInArchive(block, archiveLength))
+        {
+            return null;
+        }
+
+        int blockOffset = header.BaseOffset + block.FileOffset;
+        int compressedSize = (int)block.CompSize;
+        byte[] encrypted = new byte[compressedSize];
+        Buffer.BlockCopy(file, blockOffset, encrypted, 0, encrypted.Length);
+
+        int sectorSize = GetMpqSectorSize(file, header.BaseOffset);
+        int expectedSize = block.FileSize > Int32.MaxValue ? 0 : (int)block.FileSize;
+        string[] keyNames =
+        {
+            "staredit\\scenario.chk",
+            "scenario.chk",
+            "staredit/scenario.chk"
+        };
+
+        foreach (string keyName in keyNames)
+        {
+            uint key = Encryption.HashString(keyName, Encryption.HashType.Hash_FileKey);
+            byte[] data = TryDecryptAndDecompressMpqFile(encrypted, key, expectedSize, sectorSize);
+            data = TryCoerceRecoveredChk(data);
+            if (data != null)
+            {
+                return data;
+            }
+
+            if ((((uint)block.Flags & (uint)Flags.ModKey) != 0) && expectedSize > 0)
+            {
+                uint fixedKey = (key + (uint)block.FileOffset) ^ (uint)expectedSize;
+                data = TryDecryptAndDecompressMpqFile(encrypted, fixedKey, expectedSize, sectorSize);
+                data = TryCoerceRecoveredChk(data);
+                if (data != null)
+                {
+                    return data;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static byte[] TryCoerceRecoveredChk(byte[] data)
+    {
+        if (data == null)
+        {
+            return null;
+        }
+
+        if (LooksLikeChk(data) && ParseChk(data).Count > 0)
+        {
+            return data;
+        }
+
+        byte[] rebuilt = TryRebuildLooseChkFromBuffer(data);
+        return rebuilt != null && ParseChk(rebuilt).Count > 0 ? rebuilt : null;
+    }
+
+    private static int GetMpqSectorSize(byte[] file, int headerBase)
+    {
+        if (headerBase + 16 > file.Length)
+        {
+            return 4096;
+        }
+
+        ushort shift = BitConverter.ToUInt16(file, headerBase + 14);
+        if (shift > 24)
+        {
+            return 4096;
+        }
+
+        long size = 512L << shift;
+        return size > Int32.MaxValue ? Int32.MaxValue : (int)size;
+    }
+
+    private static byte[] TryDecryptAndDecompressMpqFile(byte[] encrypted, uint key, int expectedSize, int sectorSize)
+    {
+        if (encrypted == null || encrypted.Length < 4)
+        {
+            return null;
+        }
+
+        byte[] offsetTable = (byte[])encrypted.Clone();
+        DecryptMpqData(offsetTable, key - 1);
+
+        int sectorCount = expectedSize > 0 && sectorSize > 0
+            ? Math.Max(1, (expectedSize + sectorSize - 1) / sectorSize)
+            : 1;
+        int tableEntries = sectorCount + 1;
+        int tableBytes = tableEntries * 4;
+        if (tableBytes > encrypted.Length)
+        {
+            return null;
+        }
+
+        var offsets = new int[tableEntries];
+        bool validOffsets = true;
+        for (int i = 0; i < tableEntries; i++)
+        {
+            uint offset = BitConverter.ToUInt32(offsetTable, i * 4);
+            if (offset > encrypted.Length || (i > 0 && offset < offsets[i - 1]))
+            {
+                validOffsets = false;
+                break;
+            }
+
+            offsets[i] = (int)offset;
+        }
+
+        if (!validOffsets || offsets[0] < tableBytes || offsets[tableEntries - 1] > encrypted.Length)
+        {
+            return TryDecryptAndDecompressSingleSector(encrypted, key);
+        }
+
+        try
+        {
+            using (var output = new MemoryStream(expectedSize > 0 ? expectedSize : 0))
+            {
+                for (int i = 0; i < sectorCount; i++)
+                {
+                    int start = offsets[i];
+                    int end = offsets[i + 1];
+                    if (end <= start)
+                    {
+                        return null;
+                    }
+
+                    byte[] sector = new byte[end - start];
+                    Buffer.BlockCopy(encrypted, start, sector, 0, sector.Length);
+                    DecryptMpqData(sector, key + (uint)i);
+                    byte[] decompressed = DecompressMpqSector(sector);
+                    if (decompressed == null)
+                    {
+                        return null;
+                    }
+
+                    output.Write(decompressed, 0, decompressed.Length);
+                }
+
+                return output.ToArray();
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static byte[] TryDecryptAndDecompressSingleSector(byte[] encrypted, uint key)
+    {
+        byte[] sector = (byte[])encrypted.Clone();
+        DecryptMpqData(sector, key);
+        return DecompressMpqSector(sector);
+    }
+
+    private static byte[] TryRebuildLooseChkFromBuffer(byte[] data)
+    {
+        if (data == null || data.Length < 8)
+        {
+            return null;
+        }
+
+        var rebuilt = new List<Section>();
+        int pos = 0;
+        while (pos + 8 <= data.Length)
+        {
+            int end;
+            List<Section> sequence = TryReadLooseSectionSequence(data, pos, out end);
+            if (sequence != null && sequence.Count >= 3)
+            {
+                foreach (Section section in sequence)
+                {
+                    rebuilt.Add(section);
+                }
+
+                pos = Math.Max(pos + 1, end);
+                continue;
+            }
+
+            pos++;
+        }
+
+        if (rebuilt.Count < 3)
+        {
+            return null;
+        }
+
+        AddMissingFixedLooseSections(data, rebuilt);
+
+        bool hasCore =
+            rebuilt.Any(section => section.Name == "VER ") ||
+            rebuilt.Any(section => section.Name == "DIM ") ||
+            rebuilt.Any(section => section.Name == "TRIG") ||
+            rebuilt.Any(section => section.Name == "MTXM");
+        if (!hasCore)
+        {
+            return null;
+        }
+
+        using (var ms = new MemoryStream())
+        using (var writer = new BinaryWriter(ms, Encoding.ASCII))
+        {
+            foreach (Section section in rebuilt)
+            {
+                writer.Write(Encoding.ASCII.GetBytes(section.Name));
+                writer.Write(section.Data.Length);
+                writer.Write(section.Data);
+            }
+
+            return ms.ToArray();
+        }
+    }
+
+    private static void AddMissingFixedLooseSections(byte[] data, List<Section> sections)
+    {
+        string[] names =
+        {
+            "VER ", "TYPE", "IVE2", "VCOD", "IOWN", "OWNR", "SIDE", "COLR",
+            "ERA ", "DIM ", "SPRP", "FORC", "UPRP", "UPUS", "WAV ", "SWNM"
+        };
+
+        foreach (string name in names)
+        {
+            if (sections.Any(existing => existing.Name == name))
+            {
+                continue;
+            }
+
+            Section found = FindFirstLooseSection(data, name);
+            if (found != null)
+            {
+                sections.Add(found);
+            }
+        }
+    }
+
+    private static Section FindFirstLooseSection(byte[] data, string expectedName)
+    {
+        for (int pos = 0; pos + 8 <= data.Length; pos++)
+        {
+            string name = Encoding.ASCII.GetString(data, pos, 4);
+            if (name != expectedName)
+            {
+                continue;
+            }
+
+            uint size32 = BitConverter.ToUInt32(data, pos + 4);
+            if (size32 > Int32.MaxValue || pos + 8L + size32 > data.Length)
+            {
+                continue;
+            }
+
+            int size = (int)size32;
+            if (!IsPlausibleLooseSectionSize(name, size))
+            {
+                continue;
+            }
+
+            byte[] sectionData = new byte[size];
+            Buffer.BlockCopy(data, pos + 8, sectionData, 0, size);
+            return new Section(name, sectionData);
+        }
+
+        return null;
+    }
+
+    private static List<Section> TryReadLooseSectionSequence(byte[] data, int start, out int end)
+    {
+        end = start;
+        var sections = new List<Section>();
+        int pos = start;
+        while (pos + 8 <= data.Length)
+        {
+            string name = Encoding.ASCII.GetString(data, pos, 4);
+            if (!IsKnownChkSectionName(name))
+            {
+                break;
+            }
+
+            uint size32 = BitConverter.ToUInt32(data, pos + 4);
+            if (size32 > 64 * 1024 * 1024 || pos + 8L + size32 > data.Length)
+            {
+                break;
+            }
+
+            int size = (int)size32;
+            if (!IsPlausibleLooseSectionSize(name, size))
+            {
+                break;
+            }
+
+            byte[] sectionData = new byte[size];
+            Buffer.BlockCopy(data, pos + 8, sectionData, 0, size);
+            sections.Add(new Section(name, sectionData));
+            pos += 8 + size;
+        }
+
+        end = pos;
+        return sections.Count == 0 ? null : sections;
+    }
+
+    private static bool IsKnownChkSectionName(string name)
+    {
+        switch (name)
+        {
+            case "VER ":
+            case "TYPE":
+            case "IVE2":
+            case "VCOD":
+            case "IOWN":
+            case "OWNR":
+            case "SIDE":
+            case "COLR":
+            case "ERA ":
+            case "DIM ":
+            case "MTXM":
+            case "TILE":
+            case "ISOM":
+            case "UNIT":
+            case "PUNI":
+            case "UNIx":
+            case "PUPx":
+            case "UPGx":
+            case "DD2 ":
+            case "THG2":
+            case "MASK":
+            case "MRGN":
+            case "STR ":
+            case "SPRP":
+            case "FORC":
+            case "WAV ":
+            case "PTEx":
+            case "TECx":
+            case "MBRF":
+            case "TRIG":
+            case "UPRP":
+            case "UPUS":
+            case "SWNM":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static bool IsPlausibleLooseSectionSize(string name, int size)
+    {
+        if (size < 0)
+        {
+            return false;
+        }
+
+        switch (name)
+        {
+            case "VER ":
+            case "IVE2":
+            case "ERA ":
+                return size == 2;
+            case "TYPE":
+            case "DIM ":
+                return size == 4;
+            case "IOWN":
+            case "OWNR":
+            case "SIDE":
+            case "COLR":
+                return size == 12;
+            case "FORC":
+                return size == 20;
+            case "SPRP":
+                return size == 4;
+            case "UPUS":
+                return size == 64;
+            case "UPRP":
+                return size == 1280;
+            case "WAV ":
+                return size == 2048;
+            case "SWNM":
+                return size == 1024;
+            case "UNIT":
+                return size % 36 == 0;
+            case "MRGN":
+                return size % 20 == 0;
+            case "TRIG":
+            case "MBRF":
+                return size % 2400 == 0;
+            case "DD2 ":
+                return size % 8 == 0;
+            case "THG2":
+                return size % 10 == 0;
+            default:
+                return size <= 32 * 1024 * 1024;
+        }
+    }
+
+    private static byte[] DecompressMpqSector(byte[] sector)
+    {
+        if (sector == null || sector.Length == 0)
+        {
+            return null;
+        }
+
+        byte compression = sector[0];
+        if (compression == 0x02)
+        {
+            return InflateZlibSector(sector, 1);
+        }
+
+        if (compression == 0x08)
+        {
+            return DecompressWithTkMpq(sector);
+        }
+
+        if (compression == 0)
+        {
+            byte[] copy = new byte[sector.Length - 1];
+            Buffer.BlockCopy(sector, 1, copy, 0, copy.Length);
+            return copy;
+        }
+
+        return null;
+    }
+
+    private static byte[] DecompressWithTkMpq(byte[] sector)
+    {
+        try
+        {
+            byte[] source = (byte[])sector.Clone();
+            byte[] destination = new byte[GetMaxRecoveredSectorSize(sector.Length)];
+            int length = Compressions.Decompress(ref destination, ref source);
+            if (length <= 0 || length > destination.Length)
+            {
+                return null;
+            }
+
+            byte[] result = new byte[length];
+            Buffer.BlockCopy(destination, 0, result, 0, result.Length);
+            return result;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static int GetMaxRecoveredSectorSize(int compressedLength)
+    {
+        return Math.Max(4096, Math.Min(16 * 1024 * 1024, compressedLength * 256));
+    }
+
+    private static byte[] InflateZlibSector(byte[] sector, int offset)
+    {
+        if (sector.Length <= offset + 2)
+        {
+            return null;
+        }
+
+        int deflateOffset = offset;
+        int deflateLength = sector.Length - offset;
+        if (sector[offset] == 0x78 && offset + 2 < sector.Length)
+        {
+            deflateOffset += 2;
+            deflateLength -= 2;
+            if (deflateLength > 4)
+            {
+                deflateLength -= 4;
+            }
+        }
+
+        if (deflateLength <= 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            using (var input = new MemoryStream(sector, deflateOffset, deflateLength))
+            using (var deflate = new DeflateStream(input, CompressionMode.Decompress))
+            using (var output = new MemoryStream())
+            {
+                deflate.CopyTo(output);
+                return output.ToArray();
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void DecryptMpqData(byte[] data, uint key)
+    {
+        uint seed1 = key;
+        uint seed2 = 0xEEEEEEEE;
+
+        for (int i = 0; i + 3 < data.Length; i += 4)
+        {
+            seed2 += CryptTable[0x400 + (seed1 & 0xFF)];
+            uint value = BitConverter.ToUInt32(data, i) ^ (seed1 + seed2);
+            byte[] bytes = BitConverter.GetBytes(value);
+            Buffer.BlockCopy(bytes, 0, data, i, 4);
+            seed1 = AdvanceSeed1(seed1);
+            seed2 = value + seed2 + (seed2 << 5) + 3;
+        }
     }
 
     private static byte[] TryScanRawChk(byte[] file)

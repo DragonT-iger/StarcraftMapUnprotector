@@ -15,7 +15,7 @@ internal static partial class StarcraftMapUnprotector
     {
         "VER ", "TYPE", "IVE2", "VCOD", "IOWN", "OWNR", "SIDE", "COLR",
         "ERA ", "DIM ", "MTXM", "TILE", "ISOM", "UNIT", "PUNI", "UNIx",
-        "PUPx", "UPGx", "DD2 ", "THG2", "MASK", "MRGN", "STR ", "SPRP",
+        "PUPx", "UPGx", "DD2 ", "THG2", "MASK", "MRGN", "STR ", "STRx", "SPRP",
         "FORC", "WAV ", "PTEx", "TECx", "MBRF", "TRIG", "UPRP", "UPUS",
         "SWNM"
     };

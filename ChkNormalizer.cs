@@ -6,25 +6,26 @@ using System.Text;
 
 internal static partial class StarcraftMapUnprotector
 {
+    private static readonly Encoding KoreanEncoding = Encoding.GetEncoding(949);
+    private static readonly Encoding StrictUtf8Encoding = new UTF8Encoding(false, true);
+
     private static void NormalizeStringTableAndReferences(Dictionary<string, List<byte[]>> grouped, Stats stats)
     {
-        List<byte[]> strList;
-        if (!grouped.TryGetValue("STR ", out strList) || strList.Count == 0 || strList[0].Length < 2)
+        string[] strings = ReadBestStringTable(grouped);
+        if (strings == null || strings.Length <= 1)
         {
-            grouped["STR "] = new List<byte[]> { BuildFallbackStringTable() };
+            SetFallbackStringTables(grouped);
             grouped.Remove("UNIx");
             stats.RebuiltStrings++;
             return;
         }
 
-        byte[] str = strList[0];
-        string[] strings = ReadStringTableTolerant(str);
         var used = new SortedSet<ushort>();
         CollectStringReferences(grouped, strings, used);
 
         if (used.Count == 0)
         {
-            grouped["STR "] = new List<byte[]> { BuildFallbackStringTable() };
+            SetFallbackStringTables(grouped);
             grouped.Remove("UNIx");
             stats.RebuiltStrings++;
             return;
@@ -40,7 +41,7 @@ internal static partial class StarcraftMapUnprotector
 
         RemapStringReferences(grouped, remap);
         ushort strCount = (ushort)Math.Max(1024, rebuilt.Count);
-        grouped["STR "] = new List<byte[]> { BuildStringTable(rebuilt, strCount) };
+        SetStringTables(grouped, rebuilt, strCount);
         stats.RebuiltStrings++;
     }
 
@@ -50,26 +51,11 @@ internal static partial class StarcraftMapUnprotector
         if (grouped.TryGetValue("STR ", out list) && list.Count > 0 && IsValidStringTable(list[0]))
         {
             grouped["STR "] = new List<byte[]> { list[0] };
+            EnsureUtf8StringTable(grouped);
             return;
         }
 
-        grouped["STR "] = new List<byte[]>
-        {
-            BuildFallbackStringTable()
-        };
-    }
-
-    private static byte[] BuildFallbackStringTable()
-    {
-        return BuildStringTable(new[]
-        {
-            "Recovered Map",
-            "Recovered by StarcraftMapUnprotector",
-            "Force 1",
-            "Force 2",
-            "Force 3",
-            "Force 4"
-        }, 1024);
+        SetFallbackStringTables(grouped);
     }
 
     private static ushort GetStringCount(Dictionary<string, List<byte[]>> grouped)
@@ -136,7 +122,84 @@ internal static partial class StarcraftMapUnprotector
                 end++;
             }
 
-            strings[i] = Encoding.GetEncoding(949).GetString(str, offset, end - offset);
+            strings[i] = DecodeMapString(str, offset, end - offset);
+        }
+
+        return strings;
+    }
+
+    private static string[] ReadBestStringTable(Dictionary<string, List<byte[]>> grouped)
+    {
+        List<byte[]> strxList;
+        if (grouped.TryGetValue("STRx", out strxList) && strxList.Count > 0 && IsValidExtendedStringTable(strxList[0]))
+        {
+            return ReadUtf8StringTable(strxList[0]);
+        }
+
+        List<byte[]> strList;
+        if (!grouped.TryGetValue("STR ", out strList) || strList.Count == 0 || strList[0].Length < 2)
+        {
+            return null;
+        }
+
+        return ReadStringTableTolerant(strList[0]);
+    }
+
+    private static bool IsValidExtendedStringTable(byte[] strx)
+    {
+        if (strx == null || strx.Length < 4)
+        {
+            return false;
+        }
+
+        uint declaredCount = BitConverter.ToUInt32(strx, 0);
+        if (declaredCount == 0 || declaredCount > UInt16.MaxValue)
+        {
+            return false;
+        }
+
+        int count = (int)declaredCount;
+        int tableEnd = 4 + count * 4;
+        if (tableEnd > strx.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            uint offset = BitConverter.ToUInt32(strx, 4 + i * 4);
+            if (offset != 0 && offset >= strx.Length)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string[] ReadUtf8StringTable(byte[] strx)
+    {
+        int count = (int)BitConverter.ToUInt32(strx, 0);
+        var strings = new string[count + 1];
+        strings[0] = "";
+
+        for (int i = 1; i <= count; i++)
+        {
+            uint rawOffset = BitConverter.ToUInt32(strx, i * 4);
+            if (rawOffset == 0 || rawOffset >= strx.Length)
+            {
+                strings[i] = "";
+                continue;
+            }
+
+            int offset = (int)rawOffset;
+            int end = offset;
+            while (end < strx.Length && strx[end] != 0)
+            {
+                end++;
+            }
+
+            strings[i] = DecodeUtf8OrFallback(strx, offset, end - offset);
         }
 
         return strings;
@@ -177,10 +240,34 @@ internal static partial class StarcraftMapUnprotector
                 end++;
             }
 
-            strings[i] = Encoding.GetEncoding(949).GetString(str, offset, end - offset);
+            strings[i] = DecodeMapString(str, offset, end - offset);
         }
 
         return strings;
+    }
+
+    private static string DecodeMapString(byte[] data, int offset, int count)
+    {
+        string utf8 = TryDecodeStrictUtf8(data, offset, count);
+        return utf8 ?? KoreanEncoding.GetString(data, offset, count);
+    }
+
+    private static string DecodeUtf8OrFallback(byte[] data, int offset, int count)
+    {
+        string utf8 = TryDecodeStrictUtf8(data, offset, count);
+        return utf8 ?? KoreanEncoding.GetString(data, offset, count);
+    }
+
+    private static string TryDecodeStrictUtf8(byte[] data, int offset, int count)
+    {
+        try
+        {
+            return StrictUtf8Encoding.GetString(data, offset, count);
+        }
+        catch (DecoderFallbackException)
+        {
+            return null;
+        }
     }
 
     private static void CollectStringReferences(Dictionary<string, List<byte[]>> grouped, string[] strings, SortedSet<ushort> used)
@@ -456,7 +543,7 @@ internal static partial class StarcraftMapUnprotector
     private static byte[] BuildStringTable(IList<string> strings, int minimumCount)
     {
         using (var ms = new MemoryStream())
-        using (var writer = new BinaryWriter(ms, Encoding.GetEncoding(949)))
+        using (var writer = new BinaryWriter(ms, KoreanEncoding))
         {
             int count = Math.Max(minimumCount, strings.Count);
             if (count > UInt16.MaxValue)
@@ -470,13 +557,87 @@ internal static partial class StarcraftMapUnprotector
             {
                 string value = i < strings.Count ? strings[i] ?? "" : "";
                 writer.Write((ushort)offset);
-                offset += Encoding.GetEncoding(949).GetByteCount(value) + 1;
+                offset += KoreanEncoding.GetByteCount(value) + 1;
             }
 
             for (int i = 0; i < count; i++)
             {
                 string value = i < strings.Count ? strings[i] ?? "" : "";
-                writer.Write(Encoding.GetEncoding(949).GetBytes(value));
+                writer.Write(KoreanEncoding.GetBytes(value));
+                writer.Write((byte)0);
+            }
+
+            return ms.ToArray();
+        }
+    }
+
+    private static void SetFallbackStringTables(Dictionary<string, List<byte[]>> grouped)
+    {
+        SetStringTables(grouped, new[]
+        {
+            "Recovered Map",
+            "Recovered by StarcraftMapUnprotector",
+            "Force 1",
+            "Force 2",
+            "Force 3",
+            "Force 4"
+        }, 1024);
+    }
+
+    private static void SetStringTables(Dictionary<string, List<byte[]>> grouped, IList<string> strings, int minimumCount)
+    {
+        grouped["STR "] = new List<byte[]> { BuildStringTable(strings, minimumCount) };
+        grouped["STRx"] = new List<byte[]> { BuildUtf8StringTable(strings, minimumCount) };
+    }
+
+    private static void EnsureUtf8StringTable(Dictionary<string, List<byte[]>> grouped)
+    {
+        List<byte[]> list;
+        if (!grouped.TryGetValue("STR ", out list) || list.Count == 0 || !IsValidStringTable(list[0]))
+        {
+            return;
+        }
+
+        string[] strings = ReadStringTable(list[0]);
+        grouped["STRx"] = new List<byte[]> { BuildUtf8StringTable(ToStringValues(strings), strings.Length - 1) };
+    }
+
+    private static IList<string> ToStringValues(string[] oneBasedStrings)
+    {
+        var values = new List<string>();
+        for (int i = 1; i < oneBasedStrings.Length; i++)
+        {
+            values.Add(oneBasedStrings[i]);
+        }
+
+        return values;
+    }
+
+    private static byte[] BuildUtf8StringTable(IList<string> strings, int minimumCount)
+    {
+        using (var ms = new MemoryStream())
+        using (var writer = new BinaryWriter(ms, Encoding.UTF8))
+        {
+            int count = Math.Max(minimumCount, strings.Count);
+            writer.Write((uint)count);
+
+            long offset = 4L + count * 4L;
+            for (int i = 0; i < count; i++)
+            {
+                if (offset > UInt32.MaxValue)
+                {
+                    throw new InvalidDataException("STRx string table is too large.");
+                }
+
+                string value = i < strings.Count ? strings[i] ?? "" : "";
+                writer.Write((uint)offset);
+                offset += Encoding.UTF8.GetByteCount(value) + 1;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                string value = i < strings.Count ? strings[i] ?? "" : "";
+                writer.Write(Encoding.UTF8.GetBytes(value));
                 writer.Write((byte)0);
             }
 
