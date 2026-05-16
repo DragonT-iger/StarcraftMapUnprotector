@@ -12,6 +12,7 @@ Maps/
 *.terrainfix.*
 
 # Downloaded tools and binaries
+artifacts/
 *.exe
 *.dll
 *.zip
