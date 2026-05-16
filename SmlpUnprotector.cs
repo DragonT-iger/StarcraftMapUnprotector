@@ -36,6 +36,10 @@ internal static class SmlpUnprotector
     {
         public int MpqHashIndexesPatched;
         public int MpqTablesRecovered;
+        public int MpqDeepRecoveryUsed;
+        public int MpqDeepHeadersFound;
+        public int MpqDeepTableCandidatesTried;
+        public string MpqDeepRecoveryDetail = "";
         public int ExtraFilesCopied;
         public int RemovedSmlpSections;
         public int RemovedDuplicateSections;
@@ -77,14 +81,62 @@ internal static class SmlpUnprotector
         public int Index;
     }
 
+    private sealed class MpqHeaderCandidate
+    {
+        public int BaseOffset;
+        public uint HashTableOffset;
+        public uint BlockTableOffset;
+        public int HashCount;
+        public int BlockCount;
+    }
+
     public static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
 
-        if (args.Length < 1 || args[0] == "-h" || args[0] == "--help")
+        bool pauseOnExit = true;
+        args = args.Where(arg =>
+        {
+            if (arg == "--no-pause")
+            {
+                pauseOnExit = false;
+                return false;
+            }
+
+            return true;
+        }).ToArray();
+
+        int exitCode;
+        try
+        {
+            exitCode = Run(args);
+        }
+        finally
+        {
+            if (pauseOnExit)
+            {
+                PauseForLogReview();
+            }
+        }
+
+        return exitCode;
+    }
+
+    private static int Run(string[] args)
+    {
+        if (args.Length < 1)
+        {
+            return RunBatchFromDefaultFolders();
+        }
+
+        if (args[0] == "-h" || args[0] == "--help")
         {
             Console.WriteLine("Usage: SmlpUnprotector.exe <protected.scx|scm|scenario.chk> [output.scx]");
-            return args.Length < 1 ? 1 : 0;
+            Console.WriteLine("       SmlpUnprotector.exe");
+            Console.WriteLine();
+            Console.WriteLine("No arguments: unprotects every map-like file in Maps\\Originals to Maps\\Outputs.");
+            Console.WriteLine("Optional: add --no-pause to close immediately when finished.");
+            return 0;
         }
 
         string input = Path.GetFullPath(args[0]);
@@ -100,6 +152,87 @@ internal static class SmlpUnprotector
             return 2;
         }
 
+        bool usedDeepRecovery;
+        return UnprotectOne(input, output, out usedDeepRecovery) ? 0 : 3;
+    }
+
+    private static int RunBatchFromDefaultFolders()
+    {
+        string root = AppDomain.CurrentDomain.BaseDirectory;
+        string inputDir = Path.Combine(root, "Maps", "Originals");
+        string outputDir = Path.Combine(root, "Maps", "Outputs");
+
+        Console.WriteLine("SMLP Unprotector batch mode");
+        Console.WriteLine("Input folder : " + inputDir);
+        Console.WriteLine("Output folder: " + outputDir);
+        Console.WriteLine();
+
+        if (!Directory.Exists(inputDir))
+        {
+            Console.Error.WriteLine("Input folder not found: " + inputDir);
+            return 2;
+        }
+
+        Directory.CreateDirectory(outputDir);
+
+        string[] allowedExtensions = { ".scx", ".scm", ".tmp" };
+        FileInfo[] maps = new DirectoryInfo(inputDir)
+            .GetFiles()
+            .Where(file => allowedExtensions.Contains(file.Extension, StringComparer.OrdinalIgnoreCase))
+            .OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (maps.Length == 0)
+        {
+            Console.WriteLine("No map files found.");
+            return 0;
+        }
+
+        int ok = 0;
+        int failed = 0;
+        int deepRecovered = 0;
+
+        foreach (FileInfo map in maps)
+        {
+            string outputName = map.Name.IndexOf(".unprotected.", StringComparison.OrdinalIgnoreCase) >= 0
+                ? map.Name
+                : Path.GetFileNameWithoutExtension(map.Name) + ".unprotected" + map.Extension;
+            string output = Path.Combine(outputDir, outputName);
+
+            Console.WriteLine("============================================================");
+            Console.WriteLine(map.Name + " -> " + outputName);
+            Console.WriteLine("============================================================");
+
+            bool usedDeepRecovery;
+            if (UnprotectOne(map.FullName, output, out usedDeepRecovery))
+            {
+                ok++;
+            }
+            else
+            {
+                failed++;
+            }
+
+            if (usedDeepRecovery)
+            {
+                deepRecovered++;
+            }
+
+            Console.WriteLine();
+        }
+
+        Console.WriteLine("Done.");
+        Console.WriteLine("Succeeded: " + ok);
+        Console.WriteLine("Failed   : " + failed);
+        Console.WriteLine("Total    : " + maps.Length);
+        Console.WriteLine("MPQ deep recovery used: " + deepRecovered);
+
+        return failed == 0 ? 0 : 3;
+    }
+
+    private static bool UnprotectOne(string input, string output, out bool usedDeepRecovery)
+    {
+        usedDeepRecovery = false;
         try
         {
             var stats = new Stats();
@@ -124,12 +257,18 @@ internal static class SmlpUnprotector
 
             byte[] normalized = BuildNormalizedChk(sections, stats);
             WriteStandardMpq(output, normalized, extraFiles);
+            usedDeepRecovery = stats.MpqDeepRecoveryUsed > 0;
 
             Console.WriteLine("Input : " + input);
             Console.WriteLine("Output: " + output);
             Console.WriteLine("scenario.chk: " + chk.Length + " bytes -> " + normalized.Length + " bytes");
             Console.WriteLine("MPQ hash indexes patched: " + stats.MpqHashIndexesPatched);
             Console.WriteLine("MPQ tables recovered    : " + stats.MpqTablesRecovered);
+            Console.WriteLine("MPQ deep recovery used  : " + stats.MpqDeepRecoveryUsed);
+            if (stats.MpqDeepRecoveryDetail.Length > 0)
+            {
+                Console.WriteLine("MPQ deep recovery detail: " + stats.MpqDeepRecoveryDetail);
+            }
             Console.WriteLine("extra files copied      : " + stats.ExtraFilesCopied);
             Console.WriteLine("SMLP sections removed    : " + stats.RemovedSmlpSections);
             Console.WriteLine("duplicate sections fixed : " + stats.RemovedDuplicateSections);
@@ -150,12 +289,25 @@ internal static class SmlpUnprotector
             Console.WriteLine("MTXM selection            : " + stats.MtxmSelection);
             Console.WriteLine("ISOM confidence           : " + stats.IsomConfidence + "%");
             Console.WriteLine("TILE/MTXM match rate      : " + stats.TileMtxmMatchRate + "%");
-            return 0;
+            return true;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine("Failed: " + ex.Message);
-            return 3;
+            return false;
+        }
+    }
+
+    private static void PauseForLogReview()
+    {
+        Console.WriteLine();
+        Console.Write("Press Enter to close...");
+        try
+        {
+            Console.ReadLine();
+        }
+        catch
+        {
         }
     }
 
@@ -169,50 +321,73 @@ internal static class SmlpUnprotector
             PatchProtectedHashIndexes(mpq, stats);
             extraFiles = ExtractExtraFiles(mpq, stats);
 
-            string[] names =
+            byte[] data = TryReadScenarioChkFromMpq(mpq);
+            if (data != null)
             {
-                "staredit\\scenario.chk",
-                "staredit/scenario.chk",
-                "scenario.chk"
-            };
+                return data;
+            }
+        }
 
-            Locale[] locales =
-            {
-                Locale.English, Locale.Neutral, Locale.Korean, Locale.Japanese,
-                Locale.Chinese, Locale.EnglishUK, Locale.German, Locale.French,
-                Locale.Spanish, Locale.Italian, Locale.Polish, Locale.Portuguese,
-                Locale.Russsuan, Locale.Czech
-            };
+        List<MpqFileEntry> recoveredExtraFiles;
+        byte[] recovered = TryRecoverScenarioChkAggressively(input, stats, out recoveredExtraFiles);
+        if (recovered != null)
+        {
+            extraFiles = recoveredExtraFiles;
+            return recovered;
+        }
 
-            foreach (string name in names)
+        string detail = stats.MpqDeepRecoveryDetail.Length > 0 ? " " + stats.MpqDeepRecoveryDetail : "";
+        throw new InvalidDataException("Could not find a readable staredit\\scenario.chk." + detail);
+    }
+
+    private static byte[] TryReadScenarioChkFromMpq(TkMPQ mpq)
+    {
+        string[] names =
+        {
+            "staredit\\scenario.chk",
+            "staredit/scenario.chk",
+            "scenario.chk"
+        };
+
+        foreach (string name in names)
+        {
+            foreach (Locale locale in GetKnownLocales())
             {
-                foreach (Locale locale in locales)
+                try
                 {
-                    try
+                    using (MPQReader reader = mpq.GetFile(name, locale))
                     {
-                        using (MPQReader reader = mpq.GetFile(name, locale))
+                        if (reader == null)
                         {
-                            if (reader == null)
-                            {
-                                continue;
-                            }
+                            continue;
+                        }
 
-                            byte[] data = reader.ToArray();
-                            if (LooksLikeChk(data))
-                            {
-                                return data;
-                            }
+                        byte[] data = reader.ToArray();
+                        if (LooksLikeChk(data) && ParseChk(data).Count > 0)
+                        {
+                            return data;
                         }
                     }
-                    catch
-                    {
-                        // Protected MPQs often deliberately point hashes at malformed blocks.
-                    }
+                }
+                catch
+                {
+                    // Protected MPQs often deliberately point hashes at malformed blocks.
                 }
             }
         }
 
-        throw new InvalidDataException("Could not find a readable staredit\\scenario.chk.");
+        return null;
+    }
+
+    private static Locale[] GetKnownLocales()
+    {
+        return new[]
+        {
+            Locale.English, Locale.Neutral, Locale.Korean, Locale.Japanese,
+            Locale.Chinese, Locale.EnglishUK, Locale.German, Locale.French,
+            Locale.Spanish, Locale.Italian, Locale.Polish, Locale.Portuguese,
+            Locale.Russsuan, Locale.Czech
+        };
     }
 
     private static List<MpqFileEntry> ExtractExtraFiles(TkMPQ mpq, Stats stats)
@@ -257,15 +432,7 @@ internal static class SmlpUnprotector
 
     private static byte[] TryReadMpqFile(TkMPQ mpq, string name)
     {
-        Locale[] locales =
-        {
-            Locale.English, Locale.Neutral, Locale.Korean, Locale.Japanese,
-            Locale.Chinese, Locale.EnglishUK, Locale.German, Locale.French,
-            Locale.Spanish, Locale.Italian, Locale.Polish, Locale.Portuguese,
-            Locale.Russsuan, Locale.Czech
-        };
-
-        foreach (Locale locale in locales)
+        foreach (Locale locale in GetKnownLocales())
         {
             try
             {
@@ -283,6 +450,353 @@ internal static class SmlpUnprotector
         }
 
         return null;
+    }
+
+    private static byte[] TryRecoverScenarioChkAggressively(string input, Stats stats, out List<MpqFileEntry> extraFiles)
+    {
+        extraFiles = new List<MpqFileEntry>();
+
+        byte[] file = File.ReadAllBytes(input);
+        List<MpqHeaderCandidate> headers = FindMpqHeaderCandidates(file);
+        stats.MpqDeepHeadersFound = headers.Count;
+        if (headers.Count == 0)
+        {
+            stats.MpqDeepRecoveryDetail = "deep recovery failed: no MPQ header candidates";
+            return null;
+        }
+
+        bool sawScenarioHash = false;
+        bool sawUsableBlock = false;
+        bool sawReadableMpq = false;
+        bool sawBadChk = false;
+
+        foreach (MpqHeaderCandidate header in headers)
+        {
+            List<int> hashCandidates = BuildTableOffsetCandidates(file.Length, header.BaseOffset, header.HashTableOffset, header.HashCount);
+            List<int> blockCandidates = BuildTableOffsetCandidates(file.Length, header.BaseOffset, header.BlockTableOffset, header.BlockCount);
+
+            foreach (int hashOffset in hashCandidates)
+            {
+                HashTable[] hashes;
+                try
+                {
+                    hashes = ReadHashTable(file, hashOffset, header.HashCount);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                stats.MpqDeepTableCandidatesTried++;
+                if (!hashes.Any(IsScenarioHash))
+                {
+                    continue;
+                }
+
+                sawScenarioHash = true;
+                int afterHash = hashOffset + header.HashCount * 16;
+                AddCandidateOffset(blockCandidates, afterHash, header.BlockCount * 16, file.Length);
+
+                foreach (int blockOffset in blockCandidates)
+                {
+                    BlockTable[] blocks;
+                    try
+                    {
+                        blocks = ReadBlockTable(file, blockOffset, header.BlockCount);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    stats.MpqDeepTableCandidatesTried++;
+                    FixProtectedBlockSizes(blocks, file.Length - header.BaseOffset);
+                    if (!LooksLikeDeepRecoveredTables(hashes, blocks, file.Length - header.BaseOffset))
+                    {
+                        continue;
+                    }
+
+                    sawUsableBlock = true;
+                    byte[] data = TryReadWithRecoveredTables(file, header.BaseOffset, hashes, blocks, stats, out extraFiles);
+                    if (data != null)
+                    {
+                        stats.MpqDeepRecoveryUsed++;
+                        stats.MpqDeepRecoveryDetail =
+                            "headers=" + headers.Count +
+                            ", tableCandidates=" + stats.MpqDeepTableCandidatesTried +
+                            ", headerBase=0x" + header.BaseOffset.ToString("X") +
+                            ", hash=0x" + hashOffset.ToString("X") +
+                            ", block=0x" + blockOffset.ToString("X");
+                        return data;
+                    }
+
+                    sawReadableMpq = true;
+
+                    BlockTable[] adjustedBlocks = TryBuildBaseAdjustedBlocks(blocks, header.BaseOffset, file.Length - header.BaseOffset);
+                    if (adjustedBlocks != null)
+                    {
+                        data = TryReadWithRecoveredTables(file, header.BaseOffset, hashes, adjustedBlocks, stats, out extraFiles);
+                        if (data != null)
+                        {
+                            stats.MpqDeepRecoveryUsed++;
+                            stats.MpqDeepRecoveryDetail =
+                                "headers=" + headers.Count +
+                                ", tableCandidates=" + stats.MpqDeepTableCandidatesTried +
+                                ", headerBase=0x" + header.BaseOffset.ToString("X") +
+                                ", hash=0x" + hashOffset.ToString("X") +
+                                ", block=0x" + blockOffset.ToString("X") +
+                                ", adjustedBlockOffsets=1";
+                            return data;
+                        }
+                    }
+                    else
+                    {
+                        sawBadChk = true;
+                    }
+                }
+            }
+        }
+
+        string reason = "no table candidates";
+        if (!sawScenarioHash)
+        {
+            reason = "scenario hash not found";
+        }
+        else if (!sawUsableBlock)
+        {
+            reason = "usable scenario block not found";
+        }
+        else if (sawReadableMpq || sawBadChk)
+        {
+            reason = "recovered data did not look like CHK";
+        }
+
+        stats.MpqDeepRecoveryDetail =
+            "deep recovery failed: " + reason +
+            ", headers=" + headers.Count +
+            ", tableCandidates=" + stats.MpqDeepTableCandidatesTried;
+        return null;
+    }
+
+    private static byte[] TryReadWithRecoveredTables(
+        byte[] file,
+        int headerBase,
+        HashTable[] hashes,
+        BlockTable[] blocks,
+        Stats stats,
+        out List<MpqFileEntry> extraFiles)
+    {
+        extraFiles = new List<MpqFileEntry>();
+
+        try
+        {
+            byte[] archiveBytes = new byte[file.Length - headerBase];
+            Buffer.BlockCopy(file, headerBase, archiveBytes, 0, archiveBytes.Length);
+            using (var stream = new MemoryStream(archiveBytes, false))
+            using (var mpq = new TkMPQ(stream))
+            {
+                SetRecoveredTables(mpq, hashes, blocks);
+                PatchProtectedHashIndexes(mpq, stats);
+
+                byte[] data = TryReadScenarioChkFromMpq(mpq);
+                if (data == null)
+                {
+                    return null;
+                }
+
+                extraFiles = ExtractExtraFiles(mpq, stats);
+                return data;
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static List<MpqHeaderCandidate> FindMpqHeaderCandidates(byte[] file)
+    {
+        var result = new List<MpqHeaderCandidate>();
+        for (int offset = 0; offset + 32 <= file.Length; offset += 4)
+        {
+            if (file[offset] != (byte)'M' || file[offset + 1] != (byte)'P' ||
+                file[offset + 2] != (byte)'Q' || file[offset + 3] != 0x1A)
+            {
+                continue;
+            }
+
+            uint hashOffset = BitConverter.ToUInt32(file, offset + 16);
+            uint blockOffset = BitConverter.ToUInt32(file, offset + 20);
+            int hashCount = (int)(BitConverter.ToUInt32(file, offset + 24) & 0x0FFFFFFF);
+            int blockCount = (int)(BitConverter.ToUInt32(file, offset + 28) & 0x0FFFFFFF);
+            if (hashCount <= 0 || hashCount > 65536 || blockCount <= 0 || blockCount > 65536)
+            {
+                continue;
+            }
+
+            result.Add(new MpqHeaderCandidate
+            {
+                BaseOffset = offset,
+                HashTableOffset = hashOffset,
+                BlockTableOffset = blockOffset,
+                HashCount = hashCount,
+                BlockCount = blockCount
+            });
+        }
+
+        return result;
+    }
+
+    private static List<int> BuildTableOffsetCandidates(int fileLength, int headerBase, uint tableOffset, int entryCount)
+    {
+        int tableLength = entryCount * 16;
+        var candidates = new List<int>();
+        if (tableLength <= 0 || tableLength > fileLength)
+        {
+            return candidates;
+        }
+
+        long relative = tableOffset;
+        long absolute = headerBase + relative;
+        AddCandidateOffset(candidates, absolute, tableLength, fileLength);
+        AddCandidateOffset(candidates, absolute - 256, tableLength, fileLength);
+        AddCandidateOffset(candidates, absolute - 512, tableLength, fileLength);
+        AddCandidateOffset(candidates, absolute - 1024, tableLength, fileLength);
+        AddCandidateOffset(candidates, relative, tableLength, fileLength);
+        AddCandidateOffset(candidates, relative - 256, tableLength, fileLength);
+        AddCandidateOffset(candidates, relative - 512, tableLength, fileLength);
+        AddCandidateOffset(candidates, relative - 1024, tableLength, fileLength);
+
+        int tailStart = Math.Max(32, fileLength - 262144);
+        for (int offset = tailStart; offset + tableLength <= fileLength; offset += 4)
+        {
+            AddCandidateOffset(candidates, offset, tableLength, fileLength);
+        }
+
+        int windowStart = (int)Math.Max(32, absolute - 8192);
+        int windowEnd = (int)Math.Min(fileLength - tableLength, absolute + 8192);
+        for (int offset = windowStart; offset <= windowEnd; offset += 4)
+        {
+            AddCandidateOffset(candidates, offset, tableLength, fileLength);
+        }
+
+        return candidates.Distinct().ToList();
+    }
+
+    private static void AddCandidateOffset(List<int> candidates, long offset, int length, int fileLength)
+    {
+        if (offset < 0 || offset > Int32.MaxValue)
+        {
+            return;
+        }
+
+        int value = (int)offset;
+        if ((long)value + length <= fileLength)
+        {
+            candidates.Add(value);
+        }
+    }
+
+    private static bool LooksLikeDeepRecoveredTables(HashTable[] hashes, BlockTable[] blocks, int archiveLength)
+    {
+        if (!hashes.Any(IsScenarioHash))
+        {
+            return false;
+        }
+
+        int scenarioBlock = FindUsableScenarioBlock(hashes, blocks);
+        if (scenarioBlock >= 0 && IsBlockInArchive(blocks[scenarioBlock], archiveLength))
+        {
+            return true;
+        }
+
+        return blocks.Any(block => IsBlockInArchive(block, archiveLength));
+    }
+
+    private static bool IsBlockInArchive(BlockTable block, int archiveLength)
+    {
+        if (block.FileOffset < 0 || block.FileSize == 0 || (((uint)block.Flags & (uint)Flags.Exists) == 0))
+        {
+            return false;
+        }
+
+        if (block.CompSize == 0 || block.CompSize == UInt32.MaxValue || block.CompSize > Int32.MaxValue)
+        {
+            return false;
+        }
+
+        long end = (long)block.FileOffset + block.CompSize;
+        return end > block.FileOffset && end <= archiveLength;
+    }
+
+    private static void FixProtectedBlockSizes(BlockTable[] blocks, int archiveLength)
+    {
+        for (int i = 0; i < blocks.Length; i++)
+        {
+            BlockTable block = blocks[i];
+            if (block.FileOffset < 0 || block.CompSize != UInt32.MaxValue)
+            {
+                continue;
+            }
+
+            int next = archiveLength;
+            for (int j = 0; j < blocks.Length; j++)
+            {
+                int other = blocks[j].FileOffset;
+                if (other > block.FileOffset && other < next)
+                {
+                    next = other;
+                }
+            }
+
+            if (next > block.FileOffset)
+            {
+                block.CompSize = (uint)(next - block.FileOffset);
+                blocks[i] = block;
+            }
+        }
+    }
+
+    private static BlockTable[] TryBuildBaseAdjustedBlocks(BlockTable[] blocks, int headerBase, int archiveLength)
+    {
+        if (headerBase <= 0)
+        {
+            return null;
+        }
+
+        var adjusted = new BlockTable[blocks.Length];
+        bool changed = false;
+        for (int i = 0; i < blocks.Length; i++)
+        {
+            BlockTable block = blocks[i];
+            if (block.FileOffset >= headerBase)
+            {
+                block.FileOffset -= headerBase;
+                changed = true;
+            }
+
+            adjusted[i] = block;
+        }
+
+        return changed && adjusted.Any(block => IsBlockInArchive(block, archiveLength)) ? adjusted : null;
+    }
+
+    private static void SetRecoveredTables(TkMPQ mpq, HashTable[] hashes, BlockTable[] blocks)
+    {
+        typeof(TkMPQ).GetField("HashTables", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .SetValue(mpq, hashes);
+        typeof(TkMPQ).GetField("BlockTables", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .SetValue(mpq, blocks);
+        FieldInfo sectionField = typeof(TkMPQ).GetField("SectionSize", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (sectionField != null)
+        {
+            sectionField.SetValue(mpq, (ushort)3);
+        }
+        FieldInfo versionField = typeof(TkMPQ).GetField("MPQVersion", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (versionField != null)
+        {
+            versionField.SetValue(mpq, (ushort)0);
+        }
     }
 
     private static void PatchProtectedHashIndexes(TkMPQ mpq, Stats stats)
@@ -415,20 +929,7 @@ internal static class SmlpUnprotector
             return;
         }
 
-        typeof(TkMPQ).GetField("HashTables", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            .SetValue(mpq, hashes);
-        typeof(TkMPQ).GetField("BlockTables", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-            .SetValue(mpq, blocks);
-        FieldInfo sectionField = typeof(TkMPQ).GetField("SectionSize", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        if (sectionField != null)
-        {
-            sectionField.SetValue(mpq, (ushort)3);
-        }
-        FieldInfo versionField = typeof(TkMPQ).GetField("MPQVersion", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        if (versionField != null)
-        {
-            versionField.SetValue(mpq, (ushort)0);
-        }
+        SetRecoveredTables(mpq, hashes, blocks);
 
         stats.MpqTablesRecovered++;
     }
