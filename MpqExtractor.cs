@@ -1504,4 +1504,45 @@ internal static partial class StarcraftMapUnprotector
 
         return results;
     }
+
+    private static bool DetectFreezeProtection(byte[] data, out uint[] seedKey, out uint[] destKey)
+    {
+        seedKey = null;
+        destKey = null;
+        byte[] marker = Encoding.ASCII.GetBytes("freeze05 protect");
+        for (int i = data.Length - marker.Length; i >= 16; i--)
+        {
+            bool match = true;
+            for (int k = 0; k < marker.Length; k++)
+            {
+                if (data[i + k] != marker[k])
+                {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (!match)
+            {
+                continue;
+            }
+
+            if (i + marker.Length + 16 > data.Length)
+            {
+                continue;
+            }
+
+            seedKey = new uint[4];
+            destKey = new uint[4];
+            for (int j = 0; j < 4; j++)
+            {
+                seedKey[j] = BitConverter.ToUInt32(data, i - 16 + j * 4);
+                destKey[j] = BitConverter.ToUInt32(data, i + marker.Length + j * 4);
+            }
+
+            return true;
+        }
+
+        return false;
+    }
 }

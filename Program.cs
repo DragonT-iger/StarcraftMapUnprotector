@@ -60,6 +60,10 @@ internal static partial class StarcraftMapUnprotector
         public int TileMtxmMatchRate;
         public string MtxmSelection = "";
         public string IsomRepairMode = "";
+        public bool IsFreezeProtected;
+        public uint[] FreezeSeedKey;
+        public uint[] FreezeDestKey;
+        public int RemovedFreezeEudTriggers;
     }
 
     private sealed class MpqFileEntry
@@ -238,6 +242,15 @@ internal static partial class StarcraftMapUnprotector
             var stats = new Stats();
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);
+
+            uint[] freezeSeedKey, freezeDestKey;
+            if (DetectFreezeProtection(inputBytes, out freezeSeedKey, out freezeDestKey))
+            {
+                stats.IsFreezeProtected = true;
+                stats.FreezeSeedKey = freezeSeedKey;
+                stats.FreezeDestKey = freezeDestKey;
+            }
+
             byte[] chk;
             if (LooksLikeChk(inputBytes))
             {
@@ -270,6 +283,13 @@ internal static partial class StarcraftMapUnprotector
                 Console.WriteLine("MPQ deep recovery detail: " + stats.MpqDeepRecoveryDetail);
             }
             Console.WriteLine("extra files copied      : " + stats.ExtraFilesCopied);
+            if (stats.IsFreezeProtected)
+            {
+                Console.WriteLine("Freeze05 protection      : DETECTED");
+                Console.WriteLine("  seedKey: " + FormatKey(stats.FreezeSeedKey));
+                Console.WriteLine("  destKey: " + FormatKey(stats.FreezeDestKey));
+            }
+            Console.WriteLine("Freeze05 EUD triggers removed: " + stats.RemovedFreezeEudTriggers);
             Console.WriteLine("SMLP sections removed    : " + stats.RemovedSmlpSections);
             Console.WriteLine("duplicate sections fixed : " + stats.RemovedDuplicateSections);
             Console.WriteLine("split sections merged    : " + stats.MergedSections);
@@ -296,6 +316,12 @@ internal static partial class StarcraftMapUnprotector
             Console.Error.WriteLine("Failed: " + ex.Message);
             return false;
         }
+    }
+
+    private static string FormatKey(uint[] key)
+    {
+        if (key == null) return "(none)";
+        return string.Join(" ", key.Select(k => k.ToString("X8")));
     }
 
     private static void PauseForLogReview()

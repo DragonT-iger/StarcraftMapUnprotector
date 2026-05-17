@@ -347,6 +347,12 @@ internal static partial class StarcraftMapUnprotector
                 continue;
             }
 
+            if (stats.IsFreezeProtected && IsFreezeEudTrigger(data, pos))
+            {
+                stats.RemovedFreezeEudTriggers++;
+                continue;
+            }
+
             Buffer.BlockCopy(data, pos, kept, keptLength, 2400);
             keptLength += 2400;
         }
@@ -392,6 +398,43 @@ internal static partial class StarcraftMapUnprotector
         }
 
         return tailAllFF;
+    }
+
+    // Returns true when a trigger looks like a Freeze05 EUD protection trigger:
+    // - Has at least one EUD-addressed SetDeaths (player > 27), AND
+    // - Only contains SetDeaths (any player) or blank actions — no gameplay-visible actions.
+    //
+    // Freeze protection compiles to triggers with pairs of SetDeaths:
+    //   one targeting an EPD memory address (player > 27) for memory writes,
+    //   one targeting a normal player slot (0–27) as part of the obfuscated chain.
+    // T85/T138/T154 in this map prove that real EUD gameplay triggers have many
+    // other non-SetDeaths action types, so this filter is safe.
+    private static bool IsFreezeEudTrigger(byte[] data, int offset)
+    {
+        bool hasEudSetDeaths = false;
+        for (int i = 0; i < 64; i++)
+        {
+            int actionOffset = offset + 320 + i * 32;
+            byte actionType = data[actionOffset + 26];
+            if (actionType == 0)
+            {
+                continue;  // blank slot
+            }
+
+            if (actionType == 45)  // SetDeaths
+            {
+                uint player = BitConverter.ToUInt32(data, actionOffset + 16);
+                if (player > 27)
+                {
+                    hasEudSetDeaths = true;
+                }
+                continue;  // all SetDeaths are acceptable (EUD or normal)
+            }
+
+            return false;  // has a non-SetDeaths gameplay action → keep this trigger
+        }
+
+        return hasEudSetDeaths;  // only remove if at least one action targeted an EPD address
     }
 
     private static void NormalizeTriggerRecords(Dictionary<string, List<byte[]>> grouped, string sectionName, Stats stats)

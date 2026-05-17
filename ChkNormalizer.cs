@@ -917,6 +917,16 @@ internal static partial class StarcraftMapUnprotector
     private static void AddDefaultSections(Dictionary<string, List<byte[]>> grouped, Stats stats)
     {
         AddIfMissing(grouped, "TYPE", Encoding.ASCII.GetBytes("RAWB"), stats);
+        AddIfMissing(grouped, "VER ", new byte[] { 0xCD, 0x00 }, stats);
+
+        AddDefaultDimFromMtxm(grouped, stats);
+        AddDefaultEra(grouped, stats);
+
+        // 0x06=Human/Open, 0x05=Computer, 0x07=Neutral
+        AddIfMissing(grouped, "OWNR", new byte[] { 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 7 }, stats);
+        // 0x05=User selectable, 0x07=Inactive
+        AddIfMissing(grouped, "SIDE", new byte[] { 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 7 }, stats);
+        AddIfMissing(grouped, "COLR", new byte[] { 0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0 }, stats);
 
         List<byte[]> ownr;
         if (!grouped.ContainsKey("IOWN") && grouped.TryGetValue("OWNR", out ownr) && ownr.Count > 0 && ownr[0].Length == 12)
@@ -933,10 +943,150 @@ internal static partial class StarcraftMapUnprotector
             AddIfMissing(grouped, "IOWN", iown, stats);
         }
 
+        AddIfMissing(grouped, "VCOD", new byte[20], stats);
+        AddIfMissing(grouped, "SPRP", new byte[4], stats);
+        AddIfMissing(grouped, "FORC", new byte[20], stats);
         AddIfMissing(grouped, "IVE2", new byte[] { 0x0B, 0x00 }, stats);
         RepairTerrainSections(grouped, stats);
         AddIfMissing(grouped, "WAV ", new byte[2048], stats);
         AddIfMissing(grouped, "SWNM", new byte[1024], stats);
+
+        AddDefaultUnitSections(grouped, stats);
+        AddDefaultUpgradeSections(grouped, stats);
+        AddDefaultTechSections(grouped, stats);
+    }
+
+    private static void AddDefaultUnitSections(Dictionary<string, List<byte[]>> grouped, Stats stats)
+    {
+        AddIfMissing(grouped, "UNIT", new byte[0], stats);
+
+        // PUNI: global (228) + per-player (228 × 12) availability; 0x01 = available
+        byte[] puni = new byte[228 + 228 * 12];
+        for (int i = 0; i < puni.Length; i++) puni[i] = 1;
+        AddIfMissing(grouped, "PUNI", puni, stats);
+
+        // UNIS: SC unit settings; first 228 bytes = 0x01 (use default), rest 0x00
+        byte[] unis = new byte[4168];
+        for (int i = 0; i < 228; i++) unis[i] = 1;
+        AddIfMissing(grouped, "UNIS", unis, stats);
+
+        // UNIx: BW unit settings; first 228 bytes = 0x01 (use default), rest 0x00
+        byte[] unix = new byte[4168];
+        for (int i = 0; i < 228; i++) unix[i] = 1;
+        AddIfMissing(grouped, "UNIx", unix, stats);
+    }
+
+    private static void AddDefaultUpgradeSections(Dictionary<string, List<byte[]>> grouped, Stats stats)
+    {
+        // UPGR: SC upgrade levels; 46 upgrades × 12 players × 2 fields (max/start) = 1104 bytes, zeros = defaults
+        AddIfMissing(grouped, "UPGR", new byte[1104], stats);
+
+        // UPGx: BW upgrade levels; 61 upgrades × 12 players × 2 fields = 1464 bytes + 46 extra = 1150? use 1464 zeros
+        AddIfMissing(grouped, "UPGx", new byte[1464], stats);
+
+        // PUPx: per-player upgrade availability; 61 upgrades × 12 players = 732 bytes, all 0x01 = available
+        byte[] pupx = new byte[732];
+        for (int i = 0; i < pupx.Length; i++) pupx[i] = 1;
+        AddIfMissing(grouped, "PUPx", pupx, stats);
+    }
+
+    private static void AddDefaultTechSections(Dictionary<string, List<byte[]>> grouped, Stats stats)
+    {
+        // TECx: BW tech availability; 44 techs × 12 players × 2 fields = 1056 bytes, zeros = not researched
+        AddIfMissing(grouped, "TECx", new byte[1056], stats);
+
+        // PTEx: per-player tech availability; 44 techs × 12 players = 528 bytes, all 0x01 = available
+        byte[] ptex = new byte[528];
+        for (int i = 0; i < ptex.Length; i++) ptex[i] = 1;
+        AddIfMissing(grouped, "PTEx", ptex, stats);
+    }
+
+    private static void AddDefaultDimFromMtxm(Dictionary<string, List<byte[]>> grouped, Stats stats)
+    {
+        if (grouped.ContainsKey("DIM "))
+        {
+            return;
+        }
+
+        ushort w = 128, h = 128;
+        List<byte[]> mtxmList;
+        if (grouped.TryGetValue("MTXM", out mtxmList) && mtxmList.Count > 0 && mtxmList[0] != null)
+        {
+            int tileCount = mtxmList[0].Length / 2;
+            ushort[] sizes = { 64, 96, 128, 192, 256 };
+            foreach (ushort s in sizes)
+            {
+                if (Math.Abs(s * s - tileCount) <= s)
+                {
+                    w = s;
+                    h = s;
+                    break;
+                }
+            }
+        }
+
+        byte[] dim = new byte[4];
+        WriteUInt16(dim, 0, w);
+        WriteUInt16(dim, 2, h);
+        AddIfMissing(grouped, "DIM ", dim, stats);
+    }
+
+    private static void AddDefaultEra(Dictionary<string, List<byte[]>> grouped, Stats stats)
+    {
+        if (grouped.ContainsKey("ERA "))
+        {
+            return;
+        }
+
+        ushort era = GuessEraFromMtxm(grouped);
+        AddIfMissing(grouped, "ERA ", new byte[] { (byte)(era & 0xFF), (byte)(era >> 8) }, stats);
+    }
+
+    private static ushort GuessEraFromMtxm(Dictionary<string, List<byte[]>> grouped)
+    {
+        List<byte[]> mtxmList;
+        if (!grouped.TryGetValue("MTXM", out mtxmList) || mtxmList.Count == 0 || mtxmList[0] == null || mtxmList[0].Length < 2)
+        {
+            return 0;
+        }
+
+        byte[] mtxm = mtxmList[0];
+        int[] eraVotes = new int[8];
+        int total = mtxm.Length / 2;
+        int step = Math.Max(1, total / 1000);
+        for (int i = 0; i < total; i += step)
+        {
+            ushort tile = BitConverter.ToUInt16(mtxm, i * 2);
+            if (tile == 0)
+            {
+                continue;
+            }
+
+            int group = tile >> 4;
+            // Approximate tileset detection based on known group ranges:
+            // Badlands ~0-226, Space Platform ~1-224, Installation ~1-134,
+            // Ash World ~1-177, Jungle ~1-206, Desert ~1-222, Arctic ~1-217, Twilight ~1-206
+            // Use a heuristic: high group numbers (>200) mostly appear in Badlands, Space, Jungle, Twilight
+            // Since these ranges overlap significantly, vote by the tile value's upper nibble
+            int upperNibble = (tile >> 12) & 0xF;
+            if (upperNibble <= 1) eraVotes[0]++;       // Badlands tendency
+            else if (upperNibble == 2) eraVotes[1]++;  // Space Platform tendency
+            else if (upperNibble == 4) eraVotes[4]++;  // Jungle tendency
+            else if (upperNibble == 5) eraVotes[5]++;  // Desert tendency
+            else if (upperNibble == 6) eraVotes[6]++;  // Arctic tendency
+            else if (upperNibble == 7) eraVotes[7]++;  // Twilight tendency
+        }
+
+        int best = 0;
+        for (int i = 1; i < eraVotes.Length; i++)
+        {
+            if (eraVotes[i] > eraVotes[best])
+            {
+                best = i;
+            }
+        }
+
+        return (ushort)best;
     }
 
     private static void NormalizeCoreMapSections(Dictionary<string, List<byte[]>> grouped)
