@@ -20,6 +20,24 @@ internal static class ChkTriggerDiag
         public override void Flush() { _a.Flush(); _b.Flush(); }
     }
 
+    private sealed class TrigInfo
+    {
+        public int Ti;
+        public bool HasPreserve;
+        public List<uint[]> CreateUnits;    // [unit, loc, player]
+        public List<uint[]> DeathsConds;    // [player, unit, value, cmp]
+        public List<uint[]> SetDeathsActs;  // [player, unit, amount, modifier]
+        public List<int>    SwitchCondSets; // switch IDs with "is Set" condition
+        public List<int[]>  SetSwitchSets;  // [switchId, modifier]
+        public TrigInfo() {
+            CreateUnits   = new List<uint[]>();
+            DeathsConds   = new List<uint[]>();
+            SetDeathsActs = new List<uint[]>();
+            SwitchCondSets = new List<int>();
+            SetSwitchSets  = new List<int[]>();
+        }
+    }
+
     public static int Main(string[] args)
     {
         if (args.Length == 0)
@@ -105,7 +123,8 @@ internal static class ChkTriggerDiag
         int cntFake = 0, cntFreezeEud = 0, cntEudGameplay = 0, cntUnknownOnly = 0, cntNormal = 0;
         int cntEudWithUnknown = 0;
         var eudGameplayList = new List<int>();
-        var normalOffsets = new List<int>();
+        var normalOffsets   = new List<int>();
+        var freezeEudOffsets = new List<int>();
 
         // ---- aggregate stats ----
         var actionTypeCount = new SortedDictionary<int, int>();
@@ -145,6 +164,7 @@ internal static class ChkTriggerDiag
             if (hasEudSD && !hasNonSD)
             {
                 cntFreezeEud++;
+                freezeEudOffsets.Add(off);
             }
             else if (hasEudSD && hasNonSD)
             {
@@ -248,11 +268,16 @@ internal static class ChkTriggerDiag
             w.WriteLine();
         }
 
+        // ---- Freeze05 checksum analysis ----
+        if (freezeEudOffsets.Count > 0)
+            AnalyzeFreezeChecksum(w, data, freezeEudOffsets);
+
         // ---- Normal trigger detailed summary ----
         if (normalOffsets.Count > 0)
         {
             PrintNormalSummary(w, data, normalOffsets, strCount, name);
             FindWaveSpawnBug(w, data, normalOffsets, name);
+            FindWaveTransitionBug(w, data, normalOffsets, name);
         }
     }
 
@@ -847,6 +872,500 @@ internal static class ChkTriggerDiag
         foreach (var kv in sortedStats)
             if (kv.Key.StartsWith("unit=63 ") || kv.Key.StartsWith("unit=41 "))
                 w.WriteLine("  " + kv.Key + ": " + kv.Value + " trigger(s)");
+        w.WriteLine();
+    }
+
+    // -------------------------------------------------------------------------
+    // Wave transition timing analysis
+    // -------------------------------------------------------------------------
+
+    private static List<TrigInfo> BuildTrigInfos(byte[] data, List<int> offsets)
+    {
+        var result = new List<TrigInfo>(offsets.Count);
+        foreach (int off in offsets)
+        {
+            var t = new TrigInfo();
+            t.Ti = off / 2400;
+            for (int i = 0; i < 16; i++)
+            {
+                int c = off + i * 20;
+                byte ct = data[c + 15];
+                if (ct == 0) continue;
+                if (ct == 15)
+                {
+                    t.DeathsConds.Add(new uint[] {
+                        BitConverter.ToUInt32(data, c + 8),
+                        BitConverter.ToUInt16(data, c + 12),
+                        BitConverter.ToUInt32(data, c + 4),
+                        data[c + 14]
+                    });
+                }
+                else if (ct == 11 && data[c + 14] == 2)
+                    t.SwitchCondSets.Add(BitConverter.ToUInt16(data, c + 12));
+            }
+            for (int i = 0; i < 64; i++)
+            {
+                int a = off + 320 + i * 32;
+                byte at = data[a + 26];
+                if (at == 0) continue;
+                if (at == 44)
+                    t.CreateUnits.Add(new uint[] {
+                        BitConverter.ToUInt16(data, a + 24),
+                        BitConverter.ToUInt32(data, a + 0),
+                        BitConverter.ToUInt32(data, a + 16)
+                    });
+                else if (at == 45) { byte mod = data[a + 27]; if (mod == 7 || mod == 8 || mod == 9) t.SetDeathsActs.Add(new uint[] { BitConverter.ToUInt32(data, a + 16), BitConverter.ToUInt16(data, a + 24), BitConverter.ToUInt32(data, a + 20), mod }); }
+                else if (at == 13) { byte mod = data[a + 27]; if (mod == 4 || mod == 6) t.SetSwitchSets.Add(new int[] { (int)BitConverter.ToUInt32(data, a + 20), mod }); }
+                else if (at == 3) t.HasPreserve = true;
+            }
+            result.Add(t);
+        }
+        return result;
+    }
+
+    private static bool HasRealCU(TrigInfo t, int d1, int d2)
+    {
+        foreach (uint[] cu in t.CreateUnits) if (cu[0] != d1 && cu[0] != d2) return true;
+        return false;
+    }
+
+    private static string TrigCUs(TrigInfo t, int d1, int d2)
+    {
+        var sb = new StringBuilder();
+        foreach (uint[] cu in t.CreateUnits)
+        {
+            if (cu[0] == d1 || cu[0] == d2) continue;
+            if (sb.Length > 0) sb.Append(',');
+            sb.Append("u").Append(cu[0]).Append('(').Append(UnitName((ushort)cu[0])).Append(')');
+        }
+        return sb.ToString();
+    }
+
+    private static string UnitName(ushort id)
+    {
+        switch (id)
+        {
+            case 0: return "Marine";    case 1: return "Ghost";      case 2: return "Vulture";
+            case 3: return "Goliath";   case 5: return "SiegeTank";  case 7: return "SCV";
+            case 8: return "Wraith";    case 9: return "SciVessel";  case 11: return "Battlecruiser";
+            case 15: return "Kerrigan"; case 26: return "Siege_Siege";case 28: return "Firebat";
+            case 30: return "Medic";    case 31: return "Valkyrie";  case 32: return "Larva";
+            case 33: return "Egg";      case 34: return "Zergling";  case 35: return "Hydralisk";
+            case 36: return "Ultralisk";case 37: return "Broodling"; case 38: return "Mutalisk";
+            case 39: return "Guardian"; case 40: return "Queen";     case 41: return "Defiler";
+            case 42: return "Scourge";  case 45: return "Inf.Terran";case 54: return "Drone";
+            case 55: return "Overlord"; case 58: return "Lurker";    case 61: return "Devourer";
+            case 63: return "Broodling2";case 64: return "Corsair?"; case 65: return "Zealot";
+            case 66: return "Dragoon";  case 67: return "HiTemplar"; case 68: return "DarkTemplar";
+            case 69: return "Archon";   case 70: return "Shuttle";   case 71: return "Scout";
+            case 72: return "Arbiter";  case 73: return "Corsair2";  case 74: return "DarkArchon";
+            case 75: return "Probe";    case 0xFFFF: return "Any";
+            default: return "?";
+        }
+    }
+
+    private static void FindWaveTransitionBug(TextWriter w, byte[] data, List<int> normalOffsets, string section)
+    {
+        const int D1 = 63, D2 = 41;
+
+        w.WriteLine("=== " + section + " WAVE TRANSITION TIMING ANALYSIS ===");
+        w.WriteLine();
+
+        var allTrigs   = BuildTrigInfos(data, normalOffsets);
+        var spawnTrigs = new List<TrigInfo>();
+        foreach (var t in allTrigs) if (HasRealCU(t, D1, D2)) spawnTrigs.Add(t);
+
+        // Unit distribution
+        var unitCounts = new SortedDictionary<int, int>();
+        foreach (var t in spawnTrigs)
+            foreach (uint[] cu in t.CreateUnits)
+                if (cu[0] != D1 && cu[0] != D2) Increment(unitCounts, (int)cu[0]);
+
+        w.WriteLine("Wave spawn triggers: " + spawnTrigs.Count + "  (non-dummy CreateUnit)");
+        w.WriteLine("--- Unit IDs in wave spawns ---");
+        foreach (var kv in unitCounts)
+            w.WriteLine(string.Format("  unit={0,3} ({1,-14}): {2,5}x", kv.Key, UnitName((ushort)kv.Key), kv.Value));
+        w.WriteLine();
+
+        // Build reader map: for each counter (P,U) → value → list of spawn trigIdx checking Exactly
+        var counterReaders = new Dictionary<string, Dictionary<uint, List<int>>>(StringComparer.Ordinal);
+        foreach (var t in spawnTrigs)
+            foreach (uint[] dc in t.DeathsConds)
+            {
+                if (dc[3] != 10) continue; // only Exactly
+                string key = "P" + dc[0] + ":U" + dc[1];
+                Dictionary<uint, List<int>> vm; if (!counterReaders.TryGetValue(key, out vm)) { vm = new Dictionary<uint, List<int>>(); counterReaders[key] = vm; }
+                List<int> lst; if (!vm.TryGetValue(dc[2], out lst)) { lst = new List<int>(); vm[dc[2]] = lst; }
+                lst.Add(t.Ti);
+            }
+
+        // Build writer map: for SetTo actions on the same counters, scan ALL normal triggers
+        var counterWriters = new Dictionary<string, Dictionary<uint, List<int>>>(StringComparer.Ordinal);
+        foreach (var t in allTrigs)
+            foreach (uint[] sd in t.SetDeathsActs)
+            {
+                if (sd[3] != 7 && sd[3] != 8) continue; // SetTo or Add
+                string key = "P" + sd[0] + ":U" + sd[1];
+                if (!counterReaders.ContainsKey(key)) continue;
+                Dictionary<uint, List<int>> vm; if (!counterWriters.TryGetValue(key, out vm)) { vm = new Dictionary<uint, List<int>>(); counterWriters[key] = vm; }
+                // For Add: can't know final value statically; mark with special sentinel
+                uint newVal = sd[3] == 7 ? sd[2] : unchecked(sd[2] | 0x80000000u); // SetTo: exact, Add: marked
+                List<int> lst; if (!vm.TryGetValue(newVal, out lst)) { lst = new List<int>(); vm[newVal] = lst; }
+                lst.Add(t.Ti);
+            }
+
+        // Sort counters by spawn trigger count
+        var counterUsage = new List<KeyValuePair<string, int>>();
+        foreach (var kv in counterReaders)
+        {
+            int cnt = 0; foreach (var vkv in kv.Value) cnt += vkv.Value.Count;
+            counterUsage.Add(new KeyValuePair<string, int>(kv.Key, cnt));
+        }
+        counterUsage.Sort(delegate(KeyValuePair<string,int> a, KeyValuePair<string,int> b) { return b.Value.CompareTo(a.Value); });
+
+        w.WriteLine("--- Deaths counters gating wave spawns (top 8) ---");
+        int shownC = 0;
+        foreach (var ckv in counterUsage)
+        {
+            if (++shownC > 8) break;
+            var rmap = counterReaders[ckv.Key];
+            var readVals = new List<uint>(rmap.Keys); readVals.Sort();
+            string summary = readVals.Count <= 6
+                ? BuildValSummary(rmap, readVals)
+                : (readVals.Count + " values [" + readVals[0] + ".." + readVals[readVals.Count-1] + "]");
+            Dictionary<uint,List<int>> wmap; counterWriters.TryGetValue(ckv.Key, out wmap);
+            w.WriteLine("  counter " + ckv.Key + ": " + ckv.Value + " spawn-triggers  Exactly{" + summary + "}  SetToWriters=" + (wmap != null ? wmap.Count : 0));
+        }
+        w.WriteLine();
+
+        // Timing hazard: SetTo writer at lower index than Exactly reader for same value
+        w.WriteLine("--- Timing hazards: SetTo(N) at lower index than Exactly(N) check ---");
+        int totalHazards = 0;
+        foreach (var ckv in counterUsage)
+        {
+            string ckey = ckv.Key;
+            var rmap = counterReaders[ckey];
+            Dictionary<uint, List<int>> wmap; if (!counterWriters.TryGetValue(ckey, out wmap)) continue;
+
+            var hazardLines = new List<string>();
+            foreach (var wkv in wmap)
+            {
+                if ((wkv.Key & 0x80000000u) != 0) continue; // skip Add sentinels
+                uint newVal = wkv.Key;
+                List<int> readers; if (!rmap.TryGetValue(newVal, out readers)) continue;
+                foreach (int wTi in wkv.Value)
+                    foreach (int rTi in readers)
+                        if (wTi < rTi)
+                        {
+                            TrigInfo wt = null, rt = null;
+                            foreach (var t in allTrigs) { if (t.Ti == wTi) { wt = t; break; } }
+                            foreach (var t in allTrigs) { if (t.Ti == rTi) { rt = t; break; } }
+                            string wUnits = wt != null ? TrigCUs(wt, D1, D2) : "?";
+                            string rUnits = rt != null ? TrigCUs(rt, D1, D2) : "?";
+                            hazardLines.Add(string.Format(
+                                "  HAZARD {0} val={1}: SetTo by Trig#{2}[{3}] → Exactly check Trig#{4}[{5}]",
+                                ckey, newVal, wTi, wUnits.Length > 0 ? wUnits : "noUnit",
+                                rTi, rUnits.Length > 0 ? rUnits : "noUnit"));
+                            totalHazards++;
+                        }
+            }
+            if (hazardLines.Count > 0)
+            {
+                w.WriteLine("Counter " + ckey + ": " + hazardLines.Count + " hazard(s)");
+                int sh = 0;
+                foreach (string h in hazardLines)
+                {
+                    w.WriteLine(h);
+                    if (++sh >= 10) { w.WriteLine("  ... (" + (hazardLines.Count - sh) + " more)"); break; }
+                }
+                w.WriteLine();
+            }
+        }
+
+        // Add-based wave progression check (most likely pattern for 211-count waves)
+        w.WriteLine("--- Add(1) progression chain analysis ---");
+        w.WriteLine("(Checks if SetDeaths-Add triggers create transitions seen by higher-index spawn triggers)");
+        int addHazards = 0;
+        foreach (var ckv in counterUsage)
+        {
+            string ckey = ckv.Key;
+            var rmap = counterReaders[ckey];
+            // Find triggers that: check counter Exactly N AND have SetDeaths Add on same counter
+            // These are the self-incrementing spawn triggers
+            var selfIncrement = new List<TrigInfo>();
+            foreach (var t in allTrigs)
+            {
+                bool checksCounter = false, addsToCounter = false;
+                foreach (uint[] dc in t.DeathsConds)
+                    if (dc[3] == 10 && "P" + dc[0] + ":U" + dc[1] == ckey) { checksCounter = true; break; }
+                foreach (uint[] sd in t.SetDeathsActs)
+                    if (sd[3] == 8 && "P" + sd[0] + ":U" + sd[1] == ckey) { addsToCounter = true; break; }
+                if (checksCounter && addsToCounter) selfIncrement.Add(t);
+            }
+            if (selfIncrement.Count == 0) continue;
+
+            // Sort by condition value (wave index)
+            selfIncrement.Sort(delegate(TrigInfo a, TrigInfo b) {
+                uint va = 0, vb = 0;
+                foreach (uint[] dc in a.DeathsConds) if (dc[3] == 10 && "P"+dc[0]+":U"+dc[1] == ckey) { va = dc[2]; break; }
+                foreach (uint[] dc in b.DeathsConds) if (dc[3] == 10 && "P"+dc[0]+":U"+dc[1] == ckey) { vb = dc[2]; break; }
+                return va.CompareTo(vb);
+            });
+
+            w.WriteLine("Counter " + ckey + ": " + selfIncrement.Count + " self-incrementing triggers (check Exactly N and Add to counter)");
+
+            // Look for consecutive pairs where A.Ti < B.Ti (A fires before B in same sweep)
+            // When A fires: counter goes from N to N+1. B checks N+1 (would fire!)
+            int pairs = 0;
+            for (int i = 0; i + 1 < selfIncrement.Count; i++)
+            {
+                TrigInfo a = selfIncrement[i], b = selfIncrement[i+1];
+                uint va = 0, vb = 0;
+                foreach (uint[] dc in a.DeathsConds) if (dc[3] == 10 && "P"+dc[0]+":U"+dc[1] == ckey) { va = dc[2]; break; }
+                foreach (uint[] dc in b.DeathsConds) if (dc[3] == 10 && "P"+dc[0]+":U"+dc[1] == ckey) { vb = dc[2]; break; }
+                if (vb == va + 1 && a.Ti < b.Ti)
+                {
+                    // Consecutive and A fires first → A's Add creates B's condition
+                    string aUnits = TrigCUs(a, D1, D2);
+                    string bUnits = TrigCUs(b, D1, D2);
+                    if (pairs < 5)
+                        w.WriteLine(string.Format("  ADD-CHAIN HAZARD: Trig#{0}(N={1},{2}) → Trig#{3}(N={4},{5})  [A<B:{6}]",
+                            a.Ti, va, aUnits.Length>0?aUnits:"noUnit",
+                            b.Ti, vb, bUnits.Length>0?bUnits:"noUnit",
+                            a.Ti < b.Ti));
+                    pairs++;
+                    addHazards++;
+                }
+            }
+            if (pairs > 5) w.WriteLine("  ... (" + (pairs-5) + " more pairs)");
+            w.WriteLine("  Total consecutive ADD-CHAIN pairs where Ti_A < Ti_B: " + pairs);
+            w.WriteLine();
+        }
+
+        if (totalHazards == 0 && addHazards == 0)
+        {
+            w.WriteLine("No wave transition timing hazards found in standard triggers.");
+            w.WriteLine("If the bug exists, it may be in EUD code or SC1 engine-level behavior.");
+        }
+        else
+        {
+            w.WriteLine("Total SetTo hazards: " + totalHazards + "  Add-chain hazards: " + addHazards);
+        }
+        w.WriteLine();
+
+        // Sample conditions for top wave units
+        w.WriteLine("--- Sample conditions for main wave units ---");
+        var unitToSample = new Dictionary<int, TrigInfo>();
+        foreach (var t in spawnTrigs)
+            foreach (uint[] cu in t.CreateUnits)
+            {
+                int uid = (int)cu[0];
+                if (uid == D1 || uid == D2 || unitToSample.ContainsKey(uid)) continue;
+                unitToSample[uid] = t;
+            }
+        foreach (var kv in unitToSample)
+        {
+            TrigInfo sample = kv.Value;
+            w.WriteLine("  Unit " + kv.Key + "(" + UnitName((ushort)kv.Key) + ")  Trig#" + sample.Ti + ":");
+            foreach (uint[] dc in sample.DeathsConds)
+            {
+                string plrStr = dc[0] <= 27 ? ActionPlayerName(dc[0]) : ("EUD:0x" + dc[0].ToString("X"));
+                w.WriteLine("    Deaths " + plrStr + " U" + dc[1] + " " + CmpName((byte)dc[3]) + " " + dc[2]);
+            }
+            foreach (uint[] sd in sample.SetDeathsActs)
+            {
+                if (sd[0] > 27) continue;
+                string plrStr = ActionPlayerName(sd[0]);
+                w.WriteLine("    SetDeaths " + plrStr + " U" + sd[1] + " " + ModName((byte)sd[3]) + " " + sd[2]);
+            }
+        }
+        w.WriteLine();
+    }
+
+    private static string BuildValSummary(Dictionary<uint, List<int>> rmap, List<uint> readVals)
+    {
+        var sb = new StringBuilder();
+        foreach (uint v in readVals)
+        {
+            if (sb.Length > 0) sb.Append(' ');
+            sb.Append(v).Append('(').Append(rmap[v].Count).Append("x)");
+        }
+        return sb.ToString();
+    }
+
+    // -------------------------------------------------------------------------
+    // Freeze05 integrity / checksum analysis
+    // -------------------------------------------------------------------------
+
+    private static void AnalyzeFreezeChecksum(TextWriter w, byte[] data, List<int> freezeOffsets)
+    {
+        w.WriteLine("=== FREEZE05 INTEGRITY / CHECKSUM ANALYSIS ===");
+        w.WriteLine("Analyzing " + freezeOffsets.Count + " Freeze-EUD triggers");
+        w.WriteLine();
+
+        const uint DEATHS_BASE = 0x0058A364u;
+
+        // Collect all EPD targets and check conditions
+        var epdTargets  = new SortedDictionary<uint, int>(); // epd → write count
+        var epdLastVal  = new Dictionary<uint, uint>();      // epd → last value written
+        int totalSD = 0, eudSD = 0, normalSD = 0;
+        int eudCondCount = 0;
+        var eudCondEpds = new SortedDictionary<uint, int>(); // epd of cond → count
+        var eudCondDetail = new List<string>(); // textual detail of EUD conditions
+        bool anyDefeat = false, anyVictory = false;
+
+        foreach (int off in freezeOffsets)
+        {
+            // Check CONDITIONS (looking for EUD memory reads or defeat/victory)
+            for (int i = 0; i < 16; i++)
+            {
+                int c = off + i * 20;
+                byte ct = data[c + 15];
+                if (ct == 0) continue;
+                if (ct == 15) // Deaths
+                {
+                    uint plr = BitConverter.ToUInt32(data, c + 8);
+                    if (plr > 27)
+                    {
+                        ushort un = BitConverter.ToUInt16(data, c + 12);
+                        uint val  = BitConverter.ToUInt32(data, c + 4);
+                        byte cmp  = data[c + 14];
+                        uint epd  = unchecked(plr * 228u + un);
+                        uint addr = unchecked(DEATHS_BASE + epd * 4u);
+                        eudCondCount++;
+                        int cnt; eudCondEpds.TryGetValue(epd, out cnt); eudCondEpds[epd] = cnt + 1;
+                        if (eudCondDetail.Count < 20)
+                            eudCondDetail.Add(string.Format("    EPD 0x{0:X}(addr 0x{1:X8}) {2} {3}  Trig#{4}",
+                                epd, addr, CmpName(cmp), val, off / 2400));
+                    }
+                }
+            }
+            // Check ACTIONS
+            for (int i = 0; i < 64; i++)
+            {
+                int a = off + 320 + i * 32;
+                byte at = data[a + 26];
+                if (at == 0) continue;
+                if (at == 1) anyVictory = true;
+                if (at == 2) anyDefeat  = true;
+                if (at != 45) continue;
+                totalSD++;
+                uint plr = BitConverter.ToUInt32(data, a + 16);
+                ushort un = BitConverter.ToUInt16(data, a + 24);
+                uint amt  = BitConverter.ToUInt32(data, a + 20);
+                byte mod  = data[a + 27];
+                if (plr > 27)
+                {
+                    eudSD++;
+                    uint epd  = unchecked(plr * 228u + un);
+                    int cnt; epdTargets.TryGetValue(epd, out cnt); epdTargets[epd] = cnt + 1;
+                    if (mod == 7) epdLastVal[epd] = amt;
+                }
+                else normalSD++;
+            }
+        }
+
+        w.WriteLine("SetDeaths in Freeze-EUD triggers: total=" + totalSD + "  EUD(player>27)=" + eudSD + "  normal=" + normalSD);
+        w.WriteLine("Victory/Defeat actions in Freeze-EUD triggers: Victory=" + (anyVictory?"YES":"no") + "  Defeat=" + (anyDefeat?"YES":"no"));
+        w.WriteLine();
+
+        // EUD CONDITIONS (memory reads)
+        if (eudCondCount > 0)
+        {
+            w.WriteLine("EUD CONDITIONS (Deaths with player>27 = memory READ): " + eudCondCount);
+            w.WriteLine("→ Freeze-EUD triggers READ memory via EUD conditions — POTENTIAL INTEGRITY CHECK");
+            w.WriteLine("Unique EUD EPD addresses read: " + eudCondEpds.Count);
+            foreach (string s in eudCondDetail) w.WriteLine(s);
+            if (eudCondCount > eudCondDetail.Count) w.WriteLine("    ... (" + (eudCondCount - eudCondDetail.Count) + " more)");
+        }
+        else
+        {
+            w.WriteLine("EUD CONDITIONS: none (Freeze-EUD triggers have no memory reads in conditions)");
+            w.WriteLine("→ Protection is write-only (no condition-based checksum in the 161 removed triggers)");
+        }
+        w.WriteLine();
+
+        // EPD write targets analysis
+        w.WriteLine("EUD write targets: " + epdTargets.Count + " unique EPD addresses");
+        if (epdTargets.Count == 0) { w.WriteLine(); return; }
+
+        var epdList = new List<uint>(epdTargets.Keys);
+        uint loEpd = epdList[0], hiEpd = epdList[epdList.Count - 1];
+        uint loAddr = unchecked(DEATHS_BASE + loEpd * 4u);
+        uint hiAddr = unchecked(DEATHS_BASE + hiEpd * 4u);
+
+        w.WriteLine(string.Format("EPD range: {0} (addr 0x{1:X8})  to  {2} (addr 0x{3:X8})", loEpd, loAddr, hiEpd, hiAddr));
+
+        // Classify address range
+        // SC1 game data regions (approximate):
+        //   0x51A280 - 0x596000: unit/trigger/player structs
+        //   0x58A364+: deaths table (EPD=0 base)
+        //   0x51CA08 approx: trigger struct list starts
+        //   nextptr in trigger at +2368 within 2400-byte struct
+        //   EPD of trigger[N].nextptr ≈ (0x51CA08 + N*2400 + 2368 - 0x58A364) / 4
+        //     = (0x51CA08 - 0x58A364 + 2368 + N*2400) / 4
+        //     = (-0x6D95C + 2368 + N*2400) / 4   (as signed, wraps as uint)
+        //   For N=0: (uint)(-0x6D95C + 0x940) / 4 = (uint)(-0x6D01C) / 4 = 0xFFF92FE7 / 4 ≈ 0x3FFE4BF9
+
+        w.WriteLine();
+        w.WriteLine("Address region analysis:");
+        uint deathsLo = 0x58A364u;
+        uint deathsHi = 0x58F050u; // approximate end of deaths table (228*28*4 = 25536 bytes)
+        // Check what most EPD addresses resolve to
+        int inDeathsRange = 0, inLowMem = 0, inHighMem = 0;
+        foreach (uint epd in epdList)
+        {
+            uint addr = unchecked(DEATHS_BASE + epd * 4u);
+            if (addr >= deathsLo && addr <= deathsHi) inDeathsRange++;
+            else if (addr < deathsLo) inLowMem++;
+            else inHighMem++;
+        }
+        w.WriteLine("  In deaths table range (0x58A364-0x58F050): " + inDeathsRange);
+        w.WriteLine("  Below deaths table (trigger/code memory):  " + inLowMem);
+        w.WriteLine("  Above deaths table:                        " + inHighMem);
+
+        // Show first 10 and last 5 EUD write targets
+        w.WriteLine();
+        w.WriteLine("EUD write targets (first 10):");
+        int shown = 0;
+        foreach (uint epd in epdList)
+        {
+            uint addr = unchecked(DEATHS_BASE + epd * 4u);
+            int cnt; epdTargets.TryGetValue(epd, out cnt);
+            uint lastVal; epdLastVal.TryGetValue(epd, out lastVal);
+            string region = addr >= deathsLo && addr <= deathsHi ? "deaths" : (addr < deathsLo ? "code/trigger" : "heap?");
+            w.WriteLine(string.Format("  EPD 0x{0:X8} (addr 0x{1:X8}) writes={2,3}  lastVal=0x{3:X8}  [{4}]",
+                epd, addr, cnt, lastVal, region));
+            if (++shown >= 10) break;
+        }
+        if (epdList.Count > 10) { w.WriteLine("  ... (" + (epdList.Count - 10) + " more) ..."); }
+
+        // Check for trigger-struct nextptr range
+        // Trigger nextptr EPD for a map with ~3927 triggers, base 0x51CA08:
+        // nextptr for trigger 0: addr = 0x51CA08 + 2368 = 0x51D3C8
+        // nextptr for trigger 3927: addr = 0x51CA08 + 3927*2400 + 2368 ≈ 0x51CA08 + 0x8FB6E0 + 0x940 = 0xDB78C8
+        // These are in 'code/trigger' category (below 0x58A364) only for low-index triggers
+        // Actually 0x51CA08 < 0x58A364, so yes they are "below deaths table"
+        w.WriteLine();
+        w.WriteLine("--- Mechanism conclusion ---");
+        if (eudCondCount > 0)
+        {
+            w.WriteLine("CHECKSUM EXISTS: EUD memory read conditions detect tampered values");
+            w.WriteLine("→ If memory was not patched by EUD triggers, conditions fail → game breaks");
+        }
+        else if (inLowMem > 0)
+        {
+            w.WriteLine("INDIRECT PROTECTION: writes to pre-deaths-table memory (trigger/code region)");
+            w.WriteLine("→ EUD triggers patch SC1 trigger nextptr chain or executable code");
+            w.WriteLine("→ Removing EUD triggers = nextptrs not patched = trigger chain executes incorrectly");
+            w.WriteLine("→ No explicit checksum; integrity enforced by dependency (EUD engine needs patched memory)");
+        }
+        else
+        {
+            w.WriteLine("WRITE-TO-DEATHS-TABLE: all EUD writes go to deaths table range");
+            w.WriteLine("→ Standard EUD variable initialization pattern");
+            w.WriteLine("→ No trigger-code patching detected at EPD level");
+        }
         w.WriteLine();
     }
 
