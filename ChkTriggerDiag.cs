@@ -105,6 +105,7 @@ internal static class ChkTriggerDiag
         int cntFake = 0, cntFreezeEud = 0, cntEudGameplay = 0, cntUnknownOnly = 0, cntNormal = 0;
         int cntEudWithUnknown = 0;
         var eudGameplayList = new List<int>();
+        var normalOffsets = new List<int>();
 
         // ---- aggregate stats ----
         var actionTypeCount = new SortedDictionary<int, int>();
@@ -158,6 +159,7 @@ internal static class ChkTriggerDiag
             else
             {
                 cntNormal++;
+                normalOffsets.Add(off);
             }
 
             // Aggregate stats per condition
@@ -245,6 +247,619 @@ internal static class ChkTriggerDiag
                 DumpTrigger(w, data, ti, strCount);
             w.WriteLine();
         }
+
+        // ---- Normal trigger detailed summary ----
+        if (normalOffsets.Count > 0)
+        {
+            PrintNormalSummary(w, data, normalOffsets, strCount, name);
+            FindWaveSpawnBug(w, data, normalOffsets, name);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Normal trigger detailed summary
+    // -------------------------------------------------------------------------
+
+    private static void PrintNormalSummary(TextWriter w, byte[] data, List<int> offsets, ushort strCount, string section)
+    {
+        var actTypes  = new SortedDictionary<int, int>();
+        var condTypes = new SortedDictionary<int, int>();
+        var execSlots = new SortedDictionary<int, int>();
+
+        // SetSwitch / Switch-cond switch IDs
+        var switchActIds  = new SortedDictionary<int, int>();
+        var switchCondIds = new SortedDictionary<int, int>();
+        var switchModifiers = new SortedDictionary<int, int>(); // modifier byte of SetSwitch
+
+        // SetDeaths targets: key = "P{player}:U{unit}"
+        var sdTargets = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        // Wait times (milliseconds)
+        var waitTimes = new SortedDictionary<int, int>();
+
+        // DisplayText string IDs
+        var dispStrIds = new SortedDictionary<int, int>();
+
+        // CreateUnit: unit type, location
+        var createUnitTypes = new SortedDictionary<int, int>();
+        var createUnitLocs  = new SortedDictionary<int, int>();
+
+        // KillUnitAtLoc: unit type
+        var killUnits = new SortedDictionary<int, int>();
+
+        // SetResources: player
+        var setResPlayers = new SortedDictionary<int, int>();
+
+        // SetDeaths condition targets
+        var sdCondTargets = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        // Deaths-condition: per-player, per-unit
+        var deathsCondPlayers = new SortedDictionary<int, int>();
+        var deathsCondUnits   = new SortedDictionary<int, int>();
+
+        int totalActs = 0, totalConds = 0;
+
+        foreach (int off in offsets)
+        {
+            // Execution slots
+            for (int i = 0; i < 28; i++)
+                if (data[off + 2372 + i] != 0)
+                    Increment(execSlots, i);
+
+            // Conditions
+            for (int i = 0; i < 16; i++)
+            {
+                int c = off + i * 20;
+                byte ct = data[c + 15];
+                if (ct == 0) continue;
+                totalConds++;
+                Increment(condTypes, ct);
+
+                if (ct == 11) // Switch
+                {
+                    int sw = BitConverter.ToUInt16(data, c + 12);
+                    Increment(switchCondIds, sw);
+                }
+                else if (ct == 15) // Deaths
+                {
+                    uint grp  = BitConverter.ToUInt32(data, c + 8);
+                    ushort unit = BitConverter.ToUInt16(data, c + 12);
+                    if (grp <= 27) Increment(deathsCondPlayers, (int)grp);
+                    if (unit <= 232 || unit == 0xFFFF) Increment(deathsCondUnits, unit == 0xFFFF ? -1 : (int)unit);
+                    string key = ActionPlayerName(grp) + ":U" + (unit == 0xFFFF ? "Any" : unit.ToString());
+                    int v; sdCondTargets.TryGetValue(key, out v); sdCondTargets[key] = v + 1;
+                }
+            }
+
+            // Actions
+            for (int i = 0; i < 64; i++)
+            {
+                int a = off + 320 + i * 32;
+                byte at = data[a + 26];
+                if (at == 0) continue;
+                totalActs++;
+                Increment(actTypes, at);
+
+                uint aplr = BitConverter.ToUInt32(data, a + 16);
+                uint amt  = BitConverter.ToUInt32(data, a + 20);
+                ushort unit = BitConverter.ToUInt16(data, a + 24);
+                uint loc  = BitConverter.ToUInt32(data, a + 0);
+                uint str  = BitConverter.ToUInt32(data, a + 4);
+                uint time = BitConverter.ToUInt32(data, a + 12);
+                byte mod  = data[a + 27];
+
+                switch (at)
+                {
+                    case 4: // Wait
+                        Increment(waitTimes, (int)time);
+                        break;
+                    case 9: // DisplayText
+                        if (str > 0 && str < 0x10000)
+                            Increment(dispStrIds, (int)str);
+                        break;
+                    case 13: // SetSwitch
+                        if (amt < 0x10000) Increment(switchActIds, (int)amt);
+                        Increment(switchModifiers, mod);
+                        break;
+                    case 23: // KillUnitAtLoc
+                        Increment(killUnits, unit == 0xFFFF ? -1 : (int)unit);
+                        break;
+                    case 26: // SetResources
+                        if (aplr <= 27) Increment(setResPlayers, (int)aplr);
+                        break;
+                    case 44: // CreateUnit
+                        if (unit <= 232) Increment(createUnitTypes, unit);
+                        if (loc > 0 && loc < 0x10000) Increment(createUnitLocs, (int)loc);
+                        break;
+                    case 45: // SetDeaths (non-EUD in Normal triggers)
+                        string key = ActionPlayerName(aplr) + ":U" + (unit == 0xFFFF ? "Any" : unit.ToString());
+                        int sv; sdTargets.TryGetValue(key, out sv); sdTargets[key] = sv + 1;
+                        break;
+                }
+            }
+        }
+
+        w.WriteLine("=== " + section + " NORMAL TRIGGER SUMMARY (" + offsets.Count + " triggers) ===");
+        w.WriteLine("Non-blank actions: " + totalActs + "  Non-blank conditions: " + totalConds);
+        w.WriteLine();
+
+        // ── 1. Action type counts ──────────────────────────────────────────────
+        var sortedActs = SortDesc(actTypes);
+        w.WriteLine("--- Action types (sorted by count) ---");
+        int shown = 0;
+        foreach (var kv in sortedActs)
+        {
+            if (kv.Key == 0) continue;
+            w.WriteLine(string.Format("  {0,-28} ({1,3}): {2,6}", ActTypeName((byte)kv.Key), kv.Key, kv.Value));
+            if (++shown >= 25) break;
+        }
+        w.WriteLine();
+
+        // ── 2. Condition type counts ───────────────────────────────────────────
+        var sortedConds = SortDesc(condTypes);
+        w.WriteLine("--- Condition types (sorted by count) ---");
+        foreach (var kv in sortedConds)
+        {
+            if (kv.Key == 0) continue;
+            w.WriteLine(string.Format("  {0,-24} ({1,3}): {2,6}", CondTypeName((byte)kv.Key), kv.Key, kv.Value));
+        }
+        w.WriteLine();
+
+        // ── 3. Player execution distribution ──────────────────────────────────
+        w.WriteLine("--- Trigger execution distribution ---");
+        foreach (var kv in execSlots)
+            w.WriteLine(string.Format("  {0,-18}: {1,5} triggers", ExecSlotName(kv.Key), kv.Value));
+        w.WriteLine();
+
+        // ── 4. SetSwitch usage ────────────────────────────────────────────────
+        if (switchActIds.Count > 0 || switchCondIds.Count > 0)
+        {
+            // Merge: collect all referenced switch IDs
+            var allSw = new SortedDictionary<int, int>();
+            foreach (var kv in switchActIds)  Increment(allSw, kv.Key);
+            foreach (var kv in switchCondIds) Increment(allSw, kv.Key);
+            w.WriteLine("--- Switch usage (unique IDs: " + allSw.Count
+                + ", SetSwitch actions: " + Sum(switchActIds)
+                + ", Switch conditions: " + Sum(switchCondIds) + ") ---");
+            // Show top 20 by combined use
+            var swSorted = SortDescStr(allSw);
+            shown = 0;
+            foreach (var kv in swSorted)
+            {
+                int acts = 0; switchActIds.TryGetValue(kv.Key, out acts);
+                int conds = 0; switchCondIds.TryGetValue(kv.Key, out conds);
+                w.WriteLine(string.Format("  SW#{0,-4}  set/clear/toggle={1,-5}  check={2,-5}  total={3}",
+                    kv.Key, acts, conds, kv.Value));
+                if (++shown >= 20) break;
+            }
+            if (switchModifiers.Count > 0)
+            {
+                var sb = new StringBuilder("  SetSwitch modifiers:");
+                foreach (var kv in switchModifiers)
+                    sb.Append("  " + ModName((byte)kv.Key) + "=" + kv.Value);
+                w.WriteLine(sb.ToString());
+            }
+            w.WriteLine();
+        }
+
+        // ── 5. SetDeaths action targets ───────────────────────────────────────
+        if (sdTargets.Count > 0)
+        {
+            var sdSorted = SortDescStr(sdTargets);
+            w.WriteLine("--- SetDeaths action targets (top 30, unique combos: " + sdTargets.Count + ") ---");
+            shown = 0;
+            foreach (var kv in sdSorted)
+            {
+                w.WriteLine(string.Format("  {0,-24}: {1,5}x", kv.Key, kv.Value));
+                if (++shown >= 30) break;
+            }
+            w.WriteLine();
+        }
+
+        // ── 6. Deaths condition targets ───────────────────────────────────────
+        if (sdCondTargets.Count > 0)
+        {
+            var dcSorted = SortDescStr(sdCondTargets);
+            w.WriteLine("--- Deaths condition targets (top 20, unique combos: " + sdCondTargets.Count + ") ---");
+            shown = 0;
+            foreach (var kv in dcSorted)
+            {
+                w.WriteLine(string.Format("  {0,-24}: {1,5}x", kv.Key, kv.Value));
+                if (++shown >= 20) break;
+            }
+            w.WriteLine();
+        }
+
+        // ── 7. Wait times ─────────────────────────────────────────────────────
+        if (waitTimes.Count > 0)
+        {
+            var wtSorted = SortDesc(waitTimes);
+            w.WriteLine("--- Wait times (ms) ---");
+            foreach (var kv in wtSorted)
+                w.WriteLine(string.Format("  {0,8} ms: {1}x", kv.Key, kv.Value));
+            w.WriteLine();
+        }
+
+        // ── 8. CreateUnit breakdown ───────────────────────────────────────────
+        if (createUnitTypes.Count > 0)
+        {
+            w.WriteLine("--- CreateUnit: unit types (top 15) ---");
+            var cuSorted = SortDesc(createUnitTypes);
+            shown = 0;
+            foreach (var kv in cuSorted)
+            {
+                w.WriteLine(string.Format("  unit {0,4}: {1,5}x", kv.Key, kv.Value));
+                if (++shown >= 15) break;
+            }
+            w.WriteLine("--- CreateUnit: locations (top 15) ---");
+            var clSorted = SortDesc(createUnitLocs);
+            shown = 0;
+            foreach (var kv in clSorted)
+            {
+                w.WriteLine(string.Format("  loc  {0,4}: {1,5}x", kv.Key, kv.Value));
+                if (++shown >= 15) break;
+            }
+            w.WriteLine();
+        }
+
+        // ── 9. KillUnitAtLoc breakdown ────────────────────────────────────────
+        if (killUnits.Count > 0)
+        {
+            var kuSorted = SortDesc(killUnits);
+            w.WriteLine("--- KillUnitAtLoc: unit types ---");
+            foreach (var kv in kuSorted)
+                w.WriteLine(string.Format("  unit {0,4}: {1,5}x", kv.Key == -1 ? 65535 : kv.Key,
+                    kv.Value) + (kv.Key == -1 ? "  (Any)" : ""));
+            w.WriteLine();
+        }
+
+        // ── 10. SetResources player distribution ──────────────────────────────
+        if (setResPlayers.Count > 0)
+        {
+            w.WriteLine("--- SetResources: target players ---");
+            foreach (var kv in setResPlayers)
+                w.WriteLine(string.Format("  {0,-18}: {1,5}x", ActionPlayerName((uint)kv.Key), kv.Value));
+            w.WriteLine();
+        }
+
+        // ── 11. DisplayText string IDs ────────────────────────────────────────
+        if (dispStrIds.Count > 0)
+        {
+            var dsSorted = SortDesc(dispStrIds);
+            w.WriteLine("--- DisplayText string IDs (top 15) ---");
+            shown = 0;
+            foreach (var kv in dsSorted)
+            {
+                w.WriteLine(string.Format("  str#{0,5}: {1,4}x", kv.Key, kv.Value));
+                if (++shown >= 15) break;
+            }
+            w.WriteLine();
+        }
+    }
+
+    // Sort a SortedDictionary<int,int> by value descending, return List
+    private static List<KeyValuePair<int, int>> SortDesc(SortedDictionary<int, int> d)
+    {
+        var list = new List<KeyValuePair<int, int>>(d);
+        list.Sort(delegate(KeyValuePair<int,int> a, KeyValuePair<int,int> b)
+        {
+            return b.Value.CompareTo(a.Value);
+        });
+        return list;
+    }
+
+    private static List<KeyValuePair<int, int>> SortDescStr(SortedDictionary<int, int> d)
+    {
+        return SortDesc(d);
+    }
+
+    private static List<KeyValuePair<string, int>> SortDescStr(Dictionary<string, int> d)
+    {
+        var list = new List<KeyValuePair<string, int>>(d);
+        list.Sort(delegate(KeyValuePair<string,int> a, KeyValuePair<string,int> b)
+        {
+            return b.Value.CompareTo(a.Value);
+        });
+        return list;
+    }
+
+    private static int Sum(SortedDictionary<int, int> d)
+    {
+        int s = 0;
+        foreach (var kv in d) s += kv.Value;
+        return s;
+    }
+
+    // -------------------------------------------------------------------------
+    // Wave spawn bug analysis
+    // -------------------------------------------------------------------------
+
+    // Hashes the non-blank conditions of a trigger into a fingerprint string.
+    private static string BuildCondFingerprint(byte[] data, int off)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < 16; i++)
+        {
+            int c = off + i * 20;
+            byte ct = data[c + 15];
+            if (ct == 0) continue;
+            uint val = BitConverter.ToUInt32(data, c + 4);
+            uint grp = BitConverter.ToUInt32(data, c + 8);
+            ushort unit = BitConverter.ToUInt16(data, c + 12);
+            byte cmp = data[c + 14];
+            sb.Append(ct).Append(',').Append(val).Append(',').Append(grp)
+              .Append(',').Append(unit).Append(',').Append(cmp).Append('|');
+        }
+        return sb.Length == 0 ? "(always)" : sb.ToString();
+    }
+
+    private static void FindWaveSpawnBug(TextWriter w, byte[] data, List<int> normalOffsets, string section)
+    {
+        w.WriteLine("=== " + section + " WAVE SPAWN BUG ANALYSIS ===");
+        w.WriteLine();
+
+        // Per CreateUnit record: (unit, count, loc, player) → list of trigger indices
+        var cuStats = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        // Cross-trigger: for non-dummy CreateUnit, (unit:loc) → list of (condFP, trigIdx)
+        var unitLocTriggers = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+
+        var countNot1 = new List<string>();
+        var intraDups = new List<string>();
+
+        foreach (int off in normalOffsets)
+        {
+            int ti = off / 2400;
+
+            // Collect CreateUnit and KillUnitAtLoc in this trigger
+            var cuList = new List<uint[]>(); // [unit, count, loc, player]
+            var killUnits = new System.Collections.Generic.HashSet<int>();
+
+            for (int i = 0; i < 64; i++)
+            {
+                int a = off + 320 + i * 32;
+                byte at = data[a + 26];
+                if (at == 44) // CreateUnit
+                {
+                    cuList.Add(new uint[] {
+                        BitConverter.ToUInt16(data, a + 24),  // unit
+                        BitConverter.ToUInt32(data, a + 20),  // count (amt field)
+                        BitConverter.ToUInt32(data, a + 0),   // location
+                        BitConverter.ToUInt32(data, a + 16)   // player
+                    });
+                }
+                else if (at == 23) // KillUnitAtLoc
+                {
+                    killUnits.Add(BitConverter.ToUInt16(data, a + 24));
+                }
+            }
+            if (cuList.Count == 0) continue;
+
+            string condFP = BuildCondFingerprint(data, off);
+
+            // Check intra-trigger: same (unit, loc) twice
+            var unitLocSeen = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (uint[] cu in cuList)
+            {
+                string ul = cu[0] + ":" + cu[2];
+                int prev; unitLocSeen.TryGetValue(ul, out prev); unitLocSeen[ul] = prev + 1;
+            }
+            foreach (var kv in unitLocSeen)
+                if (kv.Value > 1)
+                    intraDups.Add("  Trig#" + ti + ": unit:loc=" + kv.Key + " CreateUnit " + kv.Value + "x in same trigger [INTRA DUPLICATE]");
+
+            foreach (uint[] cu in cuList)
+            {
+                int unit = (int)cu[0];
+                uint cnt  = cu[1];
+                uint loc  = cu[2];
+                uint plr  = cu[3];
+                bool isDummy = killUnits.Contains(unit);
+
+                // Aggregate stats (all)
+                string statKey = "unit=" + unit + " cnt=" + cnt + " loc=" + loc
+                    + " plr=" + ActionPlayerName(plr) + (isDummy ? " [dummy]" : "");
+                int sv; cuStats.TryGetValue(statKey, out sv); cuStats[statKey] = sv + 1;
+
+                // count != 1 flag
+                if (cnt != 1)
+                    countNot1.Add("  Trig#" + ti + ": unit=" + unit + " count=" + cnt
+                        + " loc=" + loc + " plr=" + ActionPlayerName(plr)
+                        + (isDummy ? " [counter-dummy]" : " ← WAVE ENEMY?"));
+
+                // Cross-trigger duplicate detection (non-dummies only)
+                if (!isDummy)
+                {
+                    string key = unit + ":" + loc;
+                    List<string> list;
+                    if (!unitLocTriggers.TryGetValue(key, out list))
+                    {
+                        list = new List<string>();
+                        unitLocTriggers[key] = list;
+                    }
+                    list.Add(condFP + "@" + ti);
+                }
+            }
+        }
+
+        // ── count != 1 ──────────────────────────────────────────────────────
+        if (countNot1.Count > 0)
+        {
+            w.WriteLine("CreateUnit with count != 1 (" + countNot1.Count + " actions):");
+            foreach (var s in countNot1) w.WriteLine(s);
+        }
+        else
+        {
+            w.WriteLine("count check: all CreateUnit have count=1.  No count-2 bug here.");
+        }
+        w.WriteLine();
+
+        // ── Intra-trigger duplicates ─────────────────────────────────────────
+        if (intraDups.Count > 0)
+        {
+            w.WriteLine("Intra-trigger duplicates (" + intraDups.Count + " cases):");
+            foreach (var s in intraDups) w.WriteLine(s);
+        }
+        else
+        {
+            w.WriteLine("Intra-trigger: no trigger creates same (unit, loc) twice.");
+        }
+        w.WriteLine();
+
+        // ── Cross-trigger duplicate detection ────────────────────────────────
+        // For each (unit, loc): count total triggers, count distinct condFPs.
+        // ratio = total / distinct.  ratio ≈ 2 → two triggers per condition → double spawn.
+        w.WriteLine("Cross-trigger analysis (non-dummy CreateUnit grouped by unit:loc):");
+        w.WriteLine(string.Format("  {0,-16}  {1,8}  {2,11}  {3,7}  {4}", "unit:loc", "triggers", "distinctConds", "ratio", "note"));
+
+        var crossList = new List<KeyValuePair<string, List<string>>>(unitLocTriggers);
+        crossList.Sort(delegate(KeyValuePair<string, List<string>> a, KeyValuePair<string, List<string>> b)
+        {
+            return b.Value.Count.CompareTo(a.Value.Count);
+        });
+
+        var dupPairs = new List<string>(); // collect suspicious pairs for extra detail
+
+        int crossShown = 0;
+        foreach (var kv in crossList)
+        {
+            // Count distinct condition fingerprints
+            var distinctFPs = new System.Collections.Generic.HashSet<string>();
+            foreach (string entry in kv.Value)
+            {
+                int at = entry.LastIndexOf('@');
+                distinctFPs.Add(at >= 0 ? entry.Substring(0, at) : entry);
+            }
+
+            int total = kv.Value.Count;
+            int distinct = distinctFPs.Count;
+            double ratio = distinct > 0 ? (double)total / distinct : 0;
+
+            string note = "";
+            if (ratio >= 1.85 && ratio <= 2.15)   note = "← RATIO≈2  DOUBLE-SPAWN CANDIDATE";
+            else if (ratio > 2.15)                 note = "← RATIO=" + ratio.ToString("F2");
+
+            w.WriteLine(string.Format("  {0,-16}  {1,8}  {2,11}  {3,7:F2}  {4}",
+                kv.Key, total, distinct, ratio, note));
+
+            if (note.Contains("DOUBLE-SPAWN"))
+                dupPairs.Add(kv.Key);
+
+            if (++crossShown >= 40) { w.WriteLine("  ... (top 40 shown)"); break; }
+        }
+        w.WriteLine();
+
+        // ── Detail for double-spawn candidates ───────────────────────────────
+        if (dupPairs.Count > 0)
+        {
+            w.WriteLine("Double-spawn candidate detail:");
+            foreach (string ulKey in dupPairs)
+            {
+                w.WriteLine("  unit:loc=" + ulKey);
+                List<string> entries = unitLocTriggers[ulKey];
+
+                // Group by condFP
+                var fpGroups = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+                foreach (string entry in entries)
+                {
+                    int at = entry.LastIndexOf('@');
+                    string fp   = at >= 0 ? entry.Substring(0, at) : entry;
+                    string tiStr = at >= 0 ? entry.Substring(at + 1) : "?";
+                    int tiNum;
+                    if (!int.TryParse(tiStr, out tiNum)) tiNum = -1;
+                    List<int> group;
+                    if (!fpGroups.TryGetValue(fp, out group)) { group = new List<int>(); fpGroups[fp] = group; }
+                    group.Add(tiNum);
+                }
+
+                foreach (var fpKv in fpGroups)
+                {
+                    if (fpKv.Value.Count > 1)
+                    {
+                        // These triggers share identical conditions AND create same unit at same loc
+                        w.WriteLine("    [IDENTICAL COND, " + fpKv.Value.Count + " triggers] → Trig indices: "
+                            + JoinInts(fpKv.Value, 8));
+                        w.WriteLine("    Cond: " + (fpKv.Key.Length > 100 ? fpKv.Key.Substring(0, 100) + "..." : fpKv.Key));
+
+                        // Dump one of the duplicate trigger pairs (first two)
+                        if (fpKv.Value.Count >= 2)
+                        {
+                            w.WriteLine("    → Exec slots comparison:");
+                            for (int k = 0; k < Math.Min(2, fpKv.Value.Count); k++)
+                            {
+                                int triIdx = fpKv.Value[k];
+                                int tOff = triIdx * 2400;
+                                var slots = new List<string>();
+                                for (int s = 0; s < 28; s++)
+                                    if (data[tOff + 2372 + s] != 0) slots.Add(ExecSlotName(s));
+                                w.WriteLine("      Trig#" + triIdx + ": "
+                                    + (slots.Count == 0 ? "(none)" : string.Join(" ", slots.ToArray())));
+
+                                // Show actions briefly
+                                var actSummary = new List<string>();
+                                for (int ai = 0; ai < 64; ai++)
+                                {
+                                    int a = tOff + 320 + ai * 32;
+                                    byte at = data[a + 26];
+                                    if (at == 0) continue;
+                                    uint aplr = BitConverter.ToUInt32(data, a + 16);
+                                    uint amt  = BitConverter.ToUInt32(data, a + 20);
+                                    ushort unit = BitConverter.ToUInt16(data, a + 24);
+                                    uint loc  = BitConverter.ToUInt32(data, a + 0);
+                                    actSummary.Add(ActTypeName(at) + "(" + unit + ",cnt=" + amt + ",loc=" + loc + ",plr=" + ActionPlayerName(aplr) + ")");
+                                }
+                                w.WriteLine("        Actions: " + string.Join("; ", actSummary.ToArray()));
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // One trigger per condition = normal
+                        // Show only if there are many of them (expected per-wave)
+                    }
+                }
+            }
+            w.WriteLine();
+        }
+        else
+        {
+            w.WriteLine("No cross-trigger double-spawn candidates found.");
+            w.WriteLine();
+        }
+
+        // ── CreateUnit stats (all, sorted) ───────────────────────────────────
+        w.WriteLine("All CreateUnit stats (excluding dummy unit=63, unit=41):");
+        var sortedStats = new List<KeyValuePair<string, int>>(cuStats);
+        sortedStats.Sort(delegate(KeyValuePair<string,int> a, KeyValuePair<string,int> b)
+        {
+            return b.Value.CompareTo(a.Value);
+        });
+        int shown = 0;
+        foreach (var kv in sortedStats)
+        {
+            if (kv.Key.StartsWith("unit=63 ") || kv.Key.StartsWith("unit=41 ")) continue;
+            w.WriteLine("  " + kv.Key + ": " + kv.Value + " trigger(s)");
+            if (++shown >= 50) break;
+        }
+        w.WriteLine();
+
+        w.WriteLine("Counter-dummy CreateUnit stats (unit=63, unit=41):");
+        foreach (var kv in sortedStats)
+            if (kv.Key.StartsWith("unit=63 ") || kv.Key.StartsWith("unit=41 "))
+                w.WriteLine("  " + kv.Key + ": " + kv.Value + " trigger(s)");
+        w.WriteLine();
+    }
+
+    private static string JoinInts(List<int> list, int maxShow)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < Math.Min(list.Count, maxShow); i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append('#').Append(list[i]);
+        }
+        if (list.Count > maxShow) sb.Append("... (" + list.Count + " total)");
+        return sb.ToString();
     }
 
     // -------------------------------------------------------------------------
