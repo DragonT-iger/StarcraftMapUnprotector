@@ -111,9 +111,15 @@ internal static partial class StarcraftMapUnprotector
         RemoveFakeUnitRecords(grouped, stats);
         RemoveFakeTriggerRecords(grouped, stats);
         RepairLocations(grouped, stats);
-        NormalizeStringTableAndReferences(grouped, stats);
-        NormalizeTriggerRecords(grouped, "TRIG", stats);
-        NormalizeTriggerRecords(grouped, "MBRF", stats);
+        if (!stats.IsFreezeProtected)
+        {
+            // EUD/Freeze maps store a compiled eudplib VM in TRIG/MBRF and use the
+            // string-id fields of EUD actions for raw data. Rebuilding the string
+            // table or normalizing trigger records corrupts the VM. Skip both.
+            NormalizeStringTableAndReferences(grouped, stats);
+            NormalizeTriggerRecords(grouped, "TRIG", stats);
+            NormalizeTriggerRecords(grouped, "MBRF", stats);
+        }
         NormalizeCoreMapSections(grouped);
 
         AddDefaultSections(grouped, stats);
@@ -337,6 +343,19 @@ internal static partial class StarcraftMapUnprotector
             return;
         }
 
+        if (stats.IsFreezeProtected && stats.FreezeDumpPath != null)
+        {
+            DumpFreezeEudTriggers(data, stats.FreezeDumpPath);
+        }
+
+        if (stats.IsFreezeProtected)
+        {
+            // EUD/Freeze maps: TRIG is a compiled eudplib VM, not editable triggers.
+            // Removing any record shifts the VM's execution chain and breaks gameplay.
+            // Preserve the section byte-for-byte.
+            return;
+        }
+
         byte[] kept = new byte[data.Length];
         int keptLength = 0;
         for (int pos = 0; pos < data.Length; pos += 2400)
@@ -398,6 +417,31 @@ internal static partial class StarcraftMapUnprotector
         }
 
         return tailAllFF;
+    }
+
+    private static void DumpFreezeEudTriggers(byte[] data, string csvPath)
+    {
+        int totalTriggers = data.Length / 2400;
+        using (var sw = new System.IO.StreamWriter(csvPath, false, System.Text.Encoding.UTF8))
+        {
+            sw.WriteLine("trigger_index,action_index,epd_player,value,modifier,unit,is_eud_trigger");
+            for (int t = 0; t < totalTriggers; t++)
+            {
+                int offset = t * 2400;
+                bool isEud = !LooksLikeFakeTrigger(data, offset) && IsFreezeEudTrigger(data, offset);
+                for (int i = 0; i < 64; i++)
+                {
+                    int aOff = offset + 320 + i * 32;
+                    byte actionType = data[aOff + 26];
+                    if (actionType != 45) continue;
+                    uint player   = BitConverter.ToUInt32(data, aOff + 16);
+                    uint value    = BitConverter.ToUInt32(data, aOff + 20);  // UnitCount = deaths amount
+                    byte modifier = data[aOff + 27];
+                    ushort unit   = BitConverter.ToUInt16(data, aOff + 24);
+                    sw.WriteLine(t + "," + i + "," + player + "," + value + "," + modifier + "," + unit + "," + (isEud ? 1 : 0));
+                }
+            }
+        }
     }
 
     // Returns true when a trigger looks like a Freeze05 EUD protection trigger:

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,6 +10,9 @@ internal static partial class StarcraftMapUnprotector
 {
     private const int UnitTypeCount = 228;
     private const int UnitNameStringOffset = 14 * UnitTypeCount;
+
+    // When set, the extracted scenario.chk is repackaged as-is with no normalization.
+    private static bool RawChkMode;
 
     private static readonly string[] CanonicalOrder =
     {
@@ -64,6 +67,7 @@ internal static partial class StarcraftMapUnprotector
         public uint[] FreezeSeedKey;
         public uint[] FreezeDestKey;
         public int RemovedFreezeEudTriggers;
+        public string FreezeDumpPath;
     }
 
     private sealed class MpqFileEntry
@@ -104,6 +108,12 @@ internal static partial class StarcraftMapUnprotector
             if (arg == "--no-pause")
             {
                 pauseOnExit = false;
+                return false;
+            }
+
+            if (arg == "--raw-chk")
+            {
+                RawChkMode = true;
                 return false;
             }
 
@@ -249,6 +259,7 @@ internal static partial class StarcraftMapUnprotector
                 stats.IsFreezeProtected = true;
                 stats.FreezeSeedKey = freezeSeedKey;
                 stats.FreezeDestKey = freezeDestKey;
+                stats.FreezeDumpPath = output + ".freeze_dump.csv";
             }
 
             byte[] chk;
@@ -268,8 +279,9 @@ internal static partial class StarcraftMapUnprotector
                 throw new InvalidDataException("scenario.chk could not be parsed.");
             }
 
-            byte[] normalized = BuildNormalizedChk(sections, stats);
-            WriteStandardMpq(output, normalized, extraFiles);
+            byte[] normalized = RawChkMode ? chk : BuildNormalizedChk(sections, stats);
+            DumpChkSections(normalized);
+            WriteStandardMpq(output, normalized, extraFiles, BuildFreezeBlob(stats));
             usedDeepRecovery = stats.MpqDeepRecoveryUsed > 0;
 
             Console.WriteLine("Input : " + input);
@@ -316,6 +328,55 @@ internal static partial class StarcraftMapUnprotector
             Console.Error.WriteLine("Failed: " + ex.Message);
             return false;
         }
+    }
+
+    private static void DumpChkSections(byte[] chk)
+    {
+        int pos = 0;
+        Console.WriteLine("CHK sections (" + chk.Length + " bytes total):");
+        while (pos + 8 <= chk.Length)
+        {
+            string name = Encoding.ASCII.GetString(chk, pos, 4);
+            uint sz = BitConverter.ToUInt32(chk, pos + 4);
+            if (sz > (uint)(chk.Length - pos - 8)) break;
+            string note = "";
+            if (name == "UNIS") note = "  <-- vanilla unit settings";
+            else if (name == "UNIx") note = "  <-- BW unit settings";
+            else if (name == "TRIG") note = "  (" + (sz / 2400) + " triggers)";
+            else if (name == "UPGS") note = "  <-- SC upgrade settings";
+            else if (name == "TECS") note = "  <-- SC tech settings";
+            Console.WriteLine("  " + name + "  " + sz + note);
+            if ((name == "UPGR" || name == "UPGx" || name == "UPGS") && sz > 0)
+            {
+                int dumpLen = (int)Math.Min(sz, 192);
+                for (int row = 0; row < dumpLen; row += 48)
+                {
+                    int rowEnd = Math.Min(row + 48, dumpLen);
+                    var sb = new StringBuilder("    [" + row + ".." + (rowEnd - 1) + "] ");
+                    for (int k = row; k < rowEnd; k++)
+                        sb.AppendFormat("{0:X2} ", chk[pos + 8 + k]);
+                    Console.WriteLine(sb.ToString());
+                }
+            }
+            pos += 8 + (int)sz;
+        }
+    }
+
+    private static byte[] BuildFreezeBlob(Stats stats)
+    {
+        if (!stats.IsFreezeProtected || stats.FreezeSeedKey == null || stats.FreezeDestKey == null)
+        {
+            return null;
+        }
+
+        byte[] blob = new byte[48];
+        for (int j = 0; j < 4; j++)
+        {
+            Buffer.BlockCopy(BitConverter.GetBytes(stats.FreezeSeedKey[j]), 0, blob, j * 4, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(stats.FreezeDestKey[j]), 0, blob, 32 + j * 4, 4);
+        }
+        Buffer.BlockCopy(Encoding.ASCII.GetBytes("freeze05 protect"), 0, blob, 16, 16);
+        return blob;
     }
 
     private static string FormatKey(uint[] key)

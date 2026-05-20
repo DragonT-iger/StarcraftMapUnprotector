@@ -965,8 +965,9 @@ internal static partial class StarcraftMapUnprotector
         for (int i = 0; i < puni.Length; i++) puni[i] = 1;
         AddIfMissing(grouped, "PUNI", puni, stats);
 
-        // UNIS: SC unit settings; first 228 bytes = 0x01 (use default), rest 0x00
-        byte[] unis = new byte[4168];
+        // UNIS: SC original unit settings (100 weapons, not 130); first 228 bytes = 0x01 (use default)
+        // 4048 = 228*(1+4+2+1+2+2+2+2) + 100*2 + 100*2 = 3648 + 400
+        byte[] unis = new byte[4048];
         for (int i = 0; i < 228; i++) unis[i] = 1;
         AddIfMissing(grouped, "UNIS", unis, stats);
 
@@ -978,16 +979,51 @@ internal static partial class StarcraftMapUnprotector
 
     private static void AddDefaultUpgradeSections(Dictionary<string, List<byte[]>> grouped, Stats stats)
     {
-        // UPGR: SC upgrade levels; 46 upgrades × 12 players × 2 fields (max/start) = 1104 bytes, zeros = defaults
-        AddIfMissing(grouped, "UPGR", new byte[1104], stats);
+        // UPGR: upgrade level restrictions. ScmDraft expects 1748 bytes (38 blocks × 46 bytes each).
+        // Each 46-byte block: [max_level=3 × 16][use_default=1 × 2][0x00][use_default=1 × 26][0x00].
+        // eudplib writes 1464 bytes (all zeros); ScmDraft reads past the end and fails.
+        const int UpgrRequiredSize = 1748;
+        List<byte[]> upgrList;
+        bool upgrMissing = !grouped.TryGetValue("UPGR", out upgrList) || upgrList.Count == 0;
+        if (upgrMissing || upgrList[0].Length < UpgrRequiredSize)
+        {
+            byte[] upgr = new byte[UpgrRequiredSize];
+            for (int block = 0; block < 38; block++)
+            {
+                int b = block * 46;
+                for (int j = 0; j < 16; j++) upgr[b + j] = 3;
+                upgr[b + 16] = 1; upgr[b + 17] = 1;
+                for (int j = 19; j <= 44; j++) upgr[b + j] = 1;
+            }
+            if (upgrMissing)
+            {
+                grouped["UPGR"] = new List<byte[]> { upgr };
+                stats.AddedDefaultSections++;
+            }
+            else
+            {
+                upgrList[0] = upgr;
+            }
+        }
 
-        // UPGx: BW upgrade levels; 61 upgrades × 12 players × 2 fields = 1464 bytes + 46 extra = 1150? use 1464 zeros
-        AddIfMissing(grouped, "UPGx", new byte[1464], stats);
+        // UPGx: BW upgrade cost/settings (794 bytes). Byte 61 is a separator and must be 0x00.
+        AddIfMissing(grouped, "UPGx", new byte[794], stats);
+        List<byte[]> upgxList;
+        if (grouped.TryGetValue("UPGx", out upgxList) && upgxList.Count > 0 && upgxList[0].Length >= 62)
+            upgxList[0][61] = 0;
 
-        // PUPx: per-player upgrade availability; 61 upgrades × 12 players = 732 bytes, all 0x01 = available
-        byte[] pupx = new byte[732];
+        // PUPx: Brood War per-player upgrade availability/defaults.
+        byte[] pupx = new byte[2318];
         for (int i = 0; i < pupx.Length; i++) pupx[i] = 1;
         AddIfMissing(grouped, "PUPx", pupx, stats);
+
+        // UPGS: SC upgrade cost settings; 598 = 46 useDefault flags + 6 arrays of 46×2 bytes
+        byte[] upgs = new byte[598];
+        for (int i = 0; i < 46; i++) upgs[i] = 1;
+        AddIfMissing(grouped, "UPGS", upgs, stats);
+
+        // UPUS: upgrade use defaults (64 bytes)
+        AddIfMissing(grouped, "UPUS", new byte[64], stats);
     }
 
     private static void AddDefaultTechSections(Dictionary<string, List<byte[]>> grouped, Stats stats)
@@ -999,6 +1035,16 @@ internal static partial class StarcraftMapUnprotector
         byte[] ptex = new byte[528];
         for (int i = 0; i < ptex.Length; i++) ptex[i] = 1;
         AddIfMissing(grouped, "PTEx", ptex, stats);
+
+        // TECS: SC tech cost settings; 216 = 24 useDefault flags + 4 arrays of 24×2 bytes
+        // Layout matches UNIS pattern: leading useDefault[0..23], then cost/time arrays
+        byte[] tecs = new byte[216];
+        for (int i = 0; i < 24; i++) tecs[i] = 1;
+        AddIfMissing(grouped, "TECS", tecs, stats);
+
+        // PTEC: per-player SC tech availability; 24 techs × 12 players × 2 fields (available/researched) = 576 bytes?
+        // Observed size in real maps is 912; use zeros (not available, not researched)
+        AddIfMissing(grouped, "PTEC", new byte[912], stats);
     }
 
     private static void AddDefaultDimFromMtxm(Dictionary<string, List<byte[]>> grouped, Stats stats)

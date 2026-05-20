@@ -259,7 +259,19 @@ internal static partial class StarcraftMapUnprotector
         }
 
         int delta = expectedBytes - data.Length;
-        if (delta < 0 || delta > 4096 || (data.Length % 2) != 0)
+        if (delta < 0)
+        {
+            if (-delta > 4096)
+            {
+                return null;
+            }
+
+            byte[] trimmed = new byte[expectedBytes];
+            Buffer.BlockCopy(data, 0, trimmed, 0, expectedBytes);
+            return trimmed;
+        }
+
+        if (delta > 4096 || (data.Length % 2) != 0)
         {
             return null;
         }
@@ -644,7 +656,25 @@ internal static partial class StarcraftMapUnprotector
         stats.AddedDefaultSections++;
     }
 
-    private static void WriteStandardMpq(string output, byte[] chk, List<MpqFileEntry> extraFiles)
+    private static void EnsureMinimumSize(Dictionary<string, List<byte[]>> grouped, string name, int minSize, Stats stats)
+    {
+        List<byte[]> list;
+        if (!grouped.TryGetValue(name, out list) || list.Count == 0)
+        {
+            grouped[name] = new List<byte[]> { new byte[minSize] };
+            stats.AddedDefaultSections++;
+            return;
+        }
+
+        if (list[0].Length < minSize)
+        {
+            byte[] padded = new byte[minSize];
+            Buffer.BlockCopy(list[0], 0, padded, 0, list[0].Length);
+            list[0] = padded;
+        }
+    }
+
+    private static void WriteStandardMpq(string output, byte[] chk, List<MpqFileEntry> extraFiles, byte[] trailingBlob)
     {
         string dir = Path.GetDirectoryName(output);
         if (!string.IsNullOrEmpty(dir))
@@ -677,6 +707,16 @@ internal static partial class StarcraftMapUnprotector
                 Locale.Neutral);
 
             mpq.SaveMPQ(output);
+        }
+
+        // Freeze05 stores [seedKey][marker][destKey] past the MPQ tables; its EUD
+        // runtime reads it back. Re-append so the protection can find it again.
+        if (trailingBlob != null && trailingBlob.Length > 0)
+        {
+            using (var fs = new FileStream(output, FileMode.Append, FileAccess.Write))
+            {
+                fs.Write(trailingBlob, 0, trailingBlob.Length);
+            }
         }
     }
 }
