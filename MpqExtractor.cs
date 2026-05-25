@@ -13,17 +13,25 @@ internal static partial class StarcraftMapUnprotector
     {
         extraFiles = new List<MpqFileEntry>();
 
-        using (var mpq = new TkMPQ(input))
+        try
         {
-            RecoverShiftedProtectedTables(input, mpq, stats);
-            PatchProtectedHashIndexes(mpq, stats);
-            extraFiles = ExtractExtraFiles(mpq, stats);
-
-            byte[] data = TryReadScenarioChkFromMpq(mpq);
-            if (data != null)
+            using (var mpq = new TkMPQ(input))
             {
-                return data;
+                RecoverShiftedProtectedTables(input, mpq, stats);
+                PatchProtectedHashIndexes(mpq, stats);
+                extraFiles = ExtractExtraFiles(mpq, stats);
+
+                byte[] data = TryReadScenarioChkFromMpq(mpq);
+                if (data != null)
+                {
+                    return data;
+                }
             }
+        }
+        catch
+        {
+            // Protected MPQs may have intentionally corrupted headers (e.g. huge
+            // hash/block counts) that crash TkMPQ. Fall through to deep recovery.
         }
 
         List<MpqFileEntry> recoveredExtraFiles;
