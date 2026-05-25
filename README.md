@@ -15,8 +15,8 @@ StarCraft 맵 파일의 보호 구조를 정리하고, 가능한 경우 `scenari
 
 Windows용 실행 파일은 GitHub Releases에서 받을 수 있습니다.
 
-- [v1.1.0 다운로드](https://github.com/DragonT-iger/StarcraftMapUnprotector/releases/tag/v1.1.0)
-- 다운로드 파일: `StarcraftMapUnprotector-v1.1.0-win.zip`
+- [v1.2.0 다운로드](https://github.com/DragonT-iger/StarcraftMapUnprotector/releases/tag/v1.2.0)
+- 다운로드 파일: `StarcraftMapUnprotector-v1.2.0-win.zip`
 
 ## 사용 방법
 
