@@ -455,6 +455,73 @@ internal static partial class StarcraftMapUnprotector
                 Console.WriteLine("  ERROR reading dump file: " + ex.Message);
             }
         }
+        else if (encryptedCount > 0 && !string.IsNullOrEmpty(FreezeRecoverDumpPath))
+        {
+            // --- Key recovery path: recover key from encrypted/decrypted pair ---
+            Console.WriteLine("  Key recovery mode: comparing CHK with runtime dump...");
+            try
+            {
+                byte[] dumpData = System.IO.File.ReadAllBytes(FreezeRecoverDumpPath);
+                int dumpTrigCount = dumpData.Length / 2400;
+
+                // Find first encrypted trigger that has a valid dump counterpart
+                int refTrigIndex = -1;
+                for (int t = 0; t < totalTriggers && t < dumpTrigCount; t++)
+                {
+                    uint fl = BitConverter.ToUInt32(data, t * 2400 + 2368);
+                    if (fl >= 0x80000000u)
+                    {
+                        refTrigIndex = t;
+                        break;
+                    }
+                }
+
+                if (refTrigIndex >= 0)
+                {
+                    Console.WriteLine("  Using trigger " + refTrigIndex + " for wlist recovery...");
+                    int[] wlist = RecoverWlistFromDump(data, refTrigIndex * 2400, dumpData, refTrigIndex * 2400);
+                    if (wlist != null)
+                    {
+                        uint fl = BitConverter.ToUInt32(data, refTrigIndex * 2400 + 2368);
+                        uint flagForCrypt = fl - 0x80000000u;
+                        uint recoveredKey = RecoverFreezeKey(flagForCrypt, wlist);
+                        if (recoveredKey != 0 || wlist[0] == 0)
+                        {
+                            // Verify by decrypting the reference trigger
+                            byte[] testBuf = new byte[2400];
+                            TryDecryptFreezeTrigger(data, refTrigIndex * 2400, recoveredKey, testBuf);
+                            if (ValidateDecryptedTrigger(testBuf))
+                            {
+                                Console.WriteLine("  Key 0x" + recoveredKey.ToString("X8") +
+                                                  " validated! Decrypting all triggers...");
+                                DecryptAllFreezeTriggers(data, recoveredKey);
+                                decrypted = encryptedCount;
+                                stats.DecryptedFreezeTriggers = decrypted;
+                            }
+                            else
+                            {
+                                Console.WriteLine("  WARNING: Recovered key failed validation. " +
+                                                  "Falling back to runtime dump apply...");
+                                int patched = ApplyRuntimeDump(data, dumpData);
+                                decrypted = patched;
+                                stats.DecryptedFreezeTriggers = patched;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("  Wlist recovery failed. Falling back to runtime dump apply...");
+                        int patched = ApplyRuntimeDump(data, dumpData);
+                        decrypted = patched;
+                        stats.DecryptedFreezeTriggers = patched;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("  ERROR in key recovery: " + ex.Message);
+            }
+        }
         else if (encryptedCount > 0 && stats.FreezeSeedKey != null)
         {
             // --- Static brute-force path (known to fail for armoha builds) ---

@@ -43,7 +43,8 @@ $sources = @(
     "ChkParser.cs",
     "ChkNormalizer.cs",
     "TerrainRepairer.cs",
-    "FreezeDecryptor.cs"
+    "FreezeDecryptor.cs",
+    "FreezeKeyRecovery.cs"
 ) | ForEach-Object { Join-Path $root $_ }
 
 $exePath = Join-Path $appDir "StarcraftMapUnprotector.exe"

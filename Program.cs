@@ -17,6 +17,9 @@ internal static partial class StarcraftMapUnprotector
     // When set, apply this runtime memory dump (from freeze_dump.lua) instead of brute-force.
     private static string ApplyDumpPath;
 
+    // When set, recover the Freeze trigger key by comparing CHK with this runtime dump.
+    private static string FreezeRecoverDumpPath;
+
     private static readonly string[] CanonicalOrder =
     {
         "VER ", "TYPE", "IVE2", "VCOD", "IOWN", "OWNR", "SIDE", "COLR",
@@ -111,6 +114,7 @@ internal static partial class StarcraftMapUnprotector
 
         bool pauseOnExit = true;
         string applyDumpPath = null;
+        string freezeRecoverDumpPath = null;
         var argList = new List<string>();
         for (int i = 0; i < args.Length; i++)
         {
@@ -126,6 +130,10 @@ internal static partial class StarcraftMapUnprotector
             {
                 applyDumpPath = Path.GetFullPath(args[++i]);
             }
+            else if (args[i] == "--freeze-recover-key" && i + 1 < args.Length)
+            {
+                freezeRecoverDumpPath = Path.GetFullPath(args[++i]);
+            }
             else
             {
                 argList.Add(args[i]);
@@ -133,6 +141,7 @@ internal static partial class StarcraftMapUnprotector
         }
         args = argList.ToArray();
         ApplyDumpPath = applyDumpPath;
+        FreezeRecoverDumpPath = freezeRecoverDumpPath;
 
         int exitCode;
         try
