@@ -55,6 +55,15 @@ internal static partial class StarcraftMapUnprotector
             return;
         }
 
+        List<byte[]> strxList;
+        if (grouped.TryGetValue("STRx", out strxList) && strxList.Count > 0 && IsValidExtendedStringTable(strxList[0]))
+        {
+            string[] strings = ReadUtf8StringTable(strxList[0]);
+            grouped["STR "] = new List<byte[]> { BuildStringTable(ToStringValues(strings), strings.Length - 1) };
+            grouped["STRx"] = new List<byte[]> { strxList[0] };
+            return;
+        }
+
         SetFallbackStringTables(grouped);
     }
 

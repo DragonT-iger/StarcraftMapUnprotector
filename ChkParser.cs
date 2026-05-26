@@ -109,6 +109,10 @@ internal static partial class StarcraftMapUnprotector
         TrimRecordSection(grouped, "MBRF", 2400);
 
         RemoveFakeUnitRecords(grouped, stats);
+        if (stats.IsFreezeProtected)
+        {
+            ProcessFreezeProtection(grouped, stats);
+        }
         RemoveFakeTriggerRecords(grouped, stats);
         RepairLocations(grouped, stats);
         if (!stats.IsFreezeProtected)

@@ -14,6 +14,9 @@ internal static partial class StarcraftMapUnprotector
     // When set, the extracted scenario.chk is repackaged as-is with no normalization.
     private static bool RawChkMode;
 
+    // When set, apply this runtime memory dump (from freeze_dump.lua) instead of brute-force.
+    private static string ApplyDumpPath;
+
     private static readonly string[] CanonicalOrder =
     {
         "VER ", "TYPE", "IVE2", "VCOD", "IOWN", "OWNR", "SIDE", "COLR",
@@ -64,10 +67,14 @@ internal static partial class StarcraftMapUnprotector
         public string MtxmSelection = "";
         public string IsomRepairMode = "";
         public bool IsFreezeProtected;
+        public bool IsEudMap;
+        public int EudAddressedTriggers;
         public uint[] FreezeSeedKey;
         public uint[] FreezeDestKey;
         public int RemovedFreezeEudTriggers;
-        public string FreezeDumpPath;
+        public int DecryptedFreezeTriggers;
+        public string FreezeDumpPath;       // path for EUD trigger CSV debug dump
+        public string FreezeApplyDumpPath;  // path for CE runtime binary dump (--apply-dump)
     }
 
     private sealed class MpqFileEntry
@@ -103,22 +110,29 @@ internal static partial class StarcraftMapUnprotector
         Console.OutputEncoding = Encoding.UTF8;
 
         bool pauseOnExit = true;
-        args = args.Where(arg =>
+        string applyDumpPath = null;
+        var argList = new List<string>();
+        for (int i = 0; i < args.Length; i++)
         {
-            if (arg == "--no-pause")
+            if (args[i] == "--no-pause")
             {
                 pauseOnExit = false;
-                return false;
             }
-
-            if (arg == "--raw-chk")
+            else if (args[i] == "--raw-chk")
             {
                 RawChkMode = true;
-                return false;
             }
-
-            return true;
-        }).ToArray();
+            else if (args[i] == "--apply-dump" && i + 1 < args.Length)
+            {
+                applyDumpPath = Path.GetFullPath(args[++i]);
+            }
+            else
+            {
+                argList.Add(args[i]);
+            }
+        }
+        args = argList.ToArray();
+        ApplyDumpPath = applyDumpPath;
 
         int exitCode;
         try
@@ -149,7 +163,11 @@ internal static partial class StarcraftMapUnprotector
             Console.WriteLine("       StarcraftMapUnprotector.exe");
             Console.WriteLine();
             Console.WriteLine("No arguments: unprotects every .scx/.scm file in Maps\\Originals to Maps\\Outputs.");
-            Console.WriteLine("Optional: add --no-pause to close immediately when finished.");
+            Console.WriteLine("Options:");
+            Console.WriteLine("  --no-pause            Close immediately when finished.");
+            Console.WriteLine("  --raw-chk             Repack CHK as-is without normalization.");
+            Console.WriteLine("  --apply-dump <file>   Apply Cheat Engine runtime dump (freeze_dump.lua output)");
+            Console.WriteLine("                        to decrypt Freeze05-protected triggers.");
             return 0;
         }
 
@@ -249,7 +267,7 @@ internal static partial class StarcraftMapUnprotector
         usedDeepRecovery = false;
         try
         {
-            var stats = new Stats();
+            var stats = new Stats { FreezeApplyDumpPath = ApplyDumpPath };
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);
 
@@ -301,7 +319,10 @@ internal static partial class StarcraftMapUnprotector
                 Console.WriteLine("  seedKey: " + FormatKey(stats.FreezeSeedKey));
                 Console.WriteLine("  destKey: " + FormatKey(stats.FreezeDestKey));
             }
-            Console.WriteLine("Freeze05 EUD triggers removed: " + stats.RemovedFreezeEudTriggers);
+            Console.WriteLine("EUD map detected         : " + (stats.IsEudMap ? "YES" : "no") +
+                              (stats.EudAddressedTriggers > 0 ? " (" + stats.EudAddressedTriggers + " trigger(s))" : ""));
+            Console.WriteLine("Freeze05 EUD triggers disabled: " + stats.RemovedFreezeEudTriggers);
+            Console.WriteLine("Freeze05 triggers decrypted : " + stats.DecryptedFreezeTriggers);
             Console.WriteLine("SMLP sections removed    : " + stats.RemovedSmlpSections);
             Console.WriteLine("duplicate sections fixed : " + stats.RemovedDuplicateSections);
             Console.WriteLine("split sections merged    : " + stats.MergedSections);
@@ -365,6 +386,11 @@ internal static partial class StarcraftMapUnprotector
     private static byte[] BuildFreezeBlob(Stats stats)
     {
         if (!stats.IsFreezeProtected || stats.FreezeSeedKey == null || stats.FreezeDestKey == null)
+        {
+            return null;
+        }
+
+        if (stats.RemovedFreezeEudTriggers > 0)
         {
             return null;
         }
