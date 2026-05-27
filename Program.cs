@@ -20,6 +20,12 @@ internal static partial class StarcraftMapUnprotector
     // When set, recover the Freeze trigger key by comparing CHK with this runtime dump.
     private static string FreezeRecoverDumpPath;
 
+    // When set, brute-force the final Freeze triggerKey directly from encrypted TRIG data.
+    private static bool FreezeBruteforceKey;
+
+    // When set, output a Lv2 (game-playable) file by patching the original MPQ in-place.
+    private static bool Lv2Mode;
+
     private static readonly string[] CanonicalOrder =
     {
         "VER ", "TYPE", "IVE2", "VCOD", "IOWN", "OWNR", "SIDE", "COLR",
@@ -78,6 +84,8 @@ internal static partial class StarcraftMapUnprotector
         public int DecryptedFreezeTriggers;
         public string FreezeDumpPath;       // path for EUD trigger CSV debug dump
         public string FreezeApplyDumpPath;  // path for CE runtime binary dump (--apply-dump)
+        public bool FreezeBruteforceKey;    // enable file-only triggerKey brute-force
+        public bool Lv2Mode;               // output game-playable file via in-place MPQ patching
     }
 
     private sealed class MpqFileEntry
@@ -134,6 +142,15 @@ internal static partial class StarcraftMapUnprotector
             {
                 freezeRecoverDumpPath = Path.GetFullPath(args[++i]);
             }
+            else if (args[i] == "--freeze-bruteforce-key")
+            {
+                FreezeBruteforceKey = true;
+            }
+            else if (args[i] == "--lv2")
+            {
+                Lv2Mode = true;
+                FreezeBruteforceKey = true;
+            }
             else
             {
                 argList.Add(args[i]);
@@ -177,6 +194,10 @@ internal static partial class StarcraftMapUnprotector
             Console.WriteLine("  --raw-chk             Repack CHK as-is without normalization.");
             Console.WriteLine("  --apply-dump <file>   Apply Cheat Engine runtime dump (freeze_dump.lua output)");
             Console.WriteLine("                        to decrypt Freeze05-protected triggers.");
+            Console.WriteLine("  --freeze-bruteforce-key");
+            Console.WriteLine("                        Brute-force the final Freeze triggerKey from encrypted TRIG data.");
+            Console.WriteLine("  --lv2                 Output a game-playable (Lv2) file by patching the original MPQ");
+            Console.WriteLine("                        in-place. Preserves MPQ structure for Freeze05 EUD compatibility.");
             return 0;
         }
 
@@ -276,7 +297,11 @@ internal static partial class StarcraftMapUnprotector
         usedDeepRecovery = false;
         try
         {
-            var stats = new Stats { FreezeApplyDumpPath = ApplyDumpPath };
+            var stats = new Stats
+            {
+                FreezeApplyDumpPath = ApplyDumpPath,
+                FreezeBruteforceKey = FreezeBruteforceKey
+            };
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);
 

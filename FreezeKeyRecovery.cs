@@ -4,6 +4,273 @@ using System.Threading.Tasks;
 
 internal static partial class StarcraftMapUnprotector
 {
+    private struct FreezeTypeByteCheck
+    {
+        public int DwordIndex;
+        public int Shift;
+        public int MaxValue;
+    }
+
+    private static readonly FreezeTypeByteCheck[][] FreezeTypeChecksByColumn = BuildFreezeTypeChecksByColumn();
+
+    private static FreezeTypeByteCheck[][] BuildFreezeTypeChecksByColumn()
+    {
+        var lists = new System.Collections.Generic.List<FreezeTypeByteCheck>[FreezeStride];
+        for (int i = 0; i < lists.Length; i++)
+            lists[i] = new System.Collections.Generic.List<FreezeTypeByteCheck>();
+
+        for (int c = 0; c < 16; c++)
+            AddFreezeTypeCheck(lists, c * 20 + 15, 23);
+
+        for (int a = 0; a < 64; a++)
+            AddFreezeTypeCheck(lists, 320 + a * 32 + 26, 63);
+
+        var result = new FreezeTypeByteCheck[FreezeStride][];
+        for (int i = 0; i < result.Length; i++)
+            result[i] = lists[i].ToArray();
+
+        return result;
+    }
+
+    private static void AddFreezeTypeCheck(
+        System.Collections.Generic.List<FreezeTypeByteCheck>[] lists,
+        int byteOffset,
+        int maxValue)
+    {
+        int dwordIndex = byteOffset / 4;
+        int column = dwordIndex % FreezeStride;
+        lists[column].Add(new FreezeTypeByteCheck
+        {
+            DwordIndex = dwordIndex,
+            Shift = (byteOffset & 3) * 8,
+            MaxValue = maxValue
+        });
+    }
+
+    private static uint ReadUInt32LE(byte[] data, int offset)
+    {
+        return (uint)(data[offset]
+            | (data[offset + 1] << 8)
+            | (data[offset + 2] << 16)
+            | (data[offset + 3] << 24));
+    }
+
+    internal static bool TryRecoverFreezeKeyByFastBruteforce(byte[] trigData, int totalTriggers, out uint recoveredKey)
+    {
+        recoveredKey = 0;
+
+        int[] anchorOffsets = CollectEncryptedTriggerOffsets(trigData, totalTriggers, 3);
+        if (anchorOffsets.Length == 0)
+            return false;
+
+        Console.WriteLine("  Freeze key brute-force: direct 2^32 triggerKey search.");
+        Console.WriteLine("  Anchors: " + anchorOffsets.Length + " encrypted trigger(s).");
+
+        uint foundKey = 0;
+        int found = 0;
+        long totalChecked = 0;
+        long fastPassed = 0;
+        long fullPassed = 0;
+
+        int degreeOfParallelism = Environment.ProcessorCount;
+        uint chunkSize = uint.MaxValue / (uint)degreeOfParallelism + 1;
+
+        Parallel.For(0, degreeOfParallelism, new ParallelOptions { MaxDegreeOfParallelism = degreeOfParallelism }, delegate(int chunk)
+        {
+            uint start = (uint)chunk * chunkSize;
+            uint end = (chunk == degreeOfParallelism - 1) ? uint.MaxValue : start + chunkSize - 1;
+
+            uint[] addSums = new uint[FreezeStride];
+            bool[] touched = new bool[FreezeStride];
+            int[] touchedColumns = new int[FreezeTabCount];
+            byte[] localBuffer = new byte[FreezeTrigSize];
+            long localChecked = 0;
+
+            for (uint key = start; ; key++)
+            {
+                if (Volatile.Read(ref found) != 0)
+                    return;
+
+                if (!FastValidateKeyAgainstAnchor(trigData, anchorOffsets[0], key, addSums, touched, touchedColumns))
+                    goto next;
+
+                Interlocked.Increment(ref fastPassed);
+
+                if (!ValidateKeyAgainstTrigger(trigData, anchorOffsets[0], key, localBuffer))
+                    goto next;
+
+                bool anchorsMatch = true;
+                for (int i = 1; i < anchorOffsets.Length; i++)
+                {
+                    if (!FastValidateKeyAgainstAnchor(trigData, anchorOffsets[i], key, addSums, touched, touchedColumns))
+                    {
+                        anchorsMatch = false;
+                        break;
+                    }
+                }
+
+                if (!anchorsMatch)
+                    goto next;
+
+                Interlocked.Increment(ref fullPassed);
+
+                if (!ValidateKeyAgainstAllEncryptedTriggers(trigData, totalTriggers, key, localBuffer))
+                    goto next;
+
+                if (Interlocked.CompareExchange(ref found, 1, 0) == 0)
+                {
+                    foundKey = key;
+                    Console.WriteLine();
+                    Console.WriteLine("  Freeze triggerKey found: 0x" + key.ToString("X8"));
+                }
+                return;
+
+                next:
+                localChecked++;
+                if (localChecked % 100000000 == 0)
+                {
+                    Interlocked.Add(ref totalChecked, 100000000);
+                    long checkedNow = Volatile.Read(ref totalChecked);
+                    double pct = checkedNow / (double)uint.MaxValue * 100.0;
+                    Console.Write("\r  Progress: " + pct.ToString("F1") + "% (" +
+                                  checkedNow.ToString("N0") + " keys, fast-pass " +
+                                  Volatile.Read(ref fastPassed).ToString("N0") +
+                                  ", full-pass " + Volatile.Read(ref fullPassed).ToString("N0") + ")   ");
+                }
+
+                if (key == end)
+                    break;
+            }
+        });
+
+        Console.WriteLine();
+        Console.WriteLine("  Fast-pass candidates: " + Volatile.Read(ref fastPassed).ToString("N0"));
+        Console.WriteLine("  Full-pass candidates: " + Volatile.Read(ref fullPassed).ToString("N0"));
+
+        if (found == 0)
+        {
+            Console.WriteLine("  Freeze triggerKey brute-force failed.");
+            return false;
+        }
+
+        recoveredKey = foundKey;
+        return true;
+    }
+
+    private static int[] CollectEncryptedTriggerOffsets(byte[] trigData, int totalTriggers, int maxCount)
+    {
+        var offsets = new System.Collections.Generic.List<int>();
+        for (int t = 0; t < totalTriggers && offsets.Count < maxCount; t++)
+        {
+            int offset = t * FreezeTrigSize;
+            uint flag = BitConverter.ToUInt32(trigData, offset + 2368);
+            if (flag >= 0x80000000u)
+                offsets.Add(offset);
+        }
+
+        return offsets.ToArray();
+    }
+
+    private static bool FastValidateKeyAgainstAnchor(
+        byte[] trigData,
+        int triggerOffset,
+        uint key,
+        uint[] addSums,
+        bool[] touched,
+        int[] touchedColumns)
+    {
+        uint flag = BitConverter.ToUInt32(trigData, triggerOffset + 2368);
+        if (flag < 0x80000000u)
+            return false;
+
+        int touchedCount = BuildFreezeAddSums(key, GetFreezeCryptFlag(flag), addSums, touched, touchedColumns);
+        bool valid = true;
+
+        for (int i = 0; i < touchedCount && valid; i++)
+        {
+            int column = touchedColumns[i];
+            FreezeTypeByteCheck[] checks = FreezeTypeChecksByColumn[column];
+            uint add = addSums[column];
+
+            for (int c = 0; c < checks.Length; c++)
+            {
+                FreezeTypeByteCheck check = checks[c];
+                int dwordOffset = triggerOffset + check.DwordIndex * 4;
+                uint decrypted = unchecked(ReadUInt32LE(trigData, dwordOffset) + add);
+                int value = (int)((decrypted >> check.Shift) & 0xFF);
+                if (value > check.MaxValue)
+                {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+
+        ClearFreezeAddSums(addSums, touched, touchedColumns, touchedCount);
+        return valid;
+    }
+
+    private static int BuildFreezeAddSums(
+        uint key,
+        uint flag,
+        uint[] addSums,
+        bool[] touched,
+        int[] touchedColumns)
+    {
+        uint r = FreezeMix2(key, flag);
+        r = FreezeMix2(r, key);
+
+        int touchedCount = 0;
+        for (int i = 0; i < FreezeTabCount; i++)
+        {
+            int w = (int)(r % (uint)FreezeStride);
+            if (!touched[w])
+            {
+                touched[w] = true;
+                touchedColumns[touchedCount++] = w;
+            }
+
+            addSums[w] = unchecked(addSums[w] + FreezeMix2((uint)w, (uint)i));
+            r = FreezeMix2(r, key + (uint)i);
+        }
+
+        return touchedCount;
+    }
+
+    private static void ClearFreezeAddSums(uint[] addSums, bool[] touched, int[] touchedColumns, int touchedCount)
+    {
+        for (int i = 0; i < touchedCount; i++)
+        {
+            int column = touchedColumns[i];
+            addSums[column] = 0;
+            touched[column] = false;
+        }
+    }
+
+    private static bool ValidateKeyAgainstTrigger(byte[] trigData, int triggerOffset, uint key, byte[] buffer)
+    {
+        if (!TryDecryptFreezeTrigger(trigData, triggerOffset, key, buffer))
+            return false;
+
+        return ValidateTriggerBodyTypes(buffer, 0);
+    }
+
+    private static bool ValidateKeyAgainstAllEncryptedTriggers(byte[] trigData, int totalTriggers, uint key, byte[] buffer)
+    {
+        for (int t = 0; t < totalTriggers; t++)
+        {
+            int offset = t * FreezeTrigSize;
+            uint flag = BitConverter.ToUInt32(trigData, offset + 2368);
+            if (flag < 0x80000000u)
+                continue;
+
+            if (!ValidateKeyAgainstTrigger(trigData, offset, key, buffer))
+                return false;
+        }
+
+        return true;
+    }
+
     internal static uint RecoverFreezeKey(uint flag, int[] targetWlist)
     {
         int stride = FreezeStride; // 74
