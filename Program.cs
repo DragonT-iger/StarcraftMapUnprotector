@@ -23,8 +23,11 @@ internal static partial class StarcraftMapUnprotector
     // When set, brute-force the final Freeze triggerKey directly from encrypted TRIG data.
     private static bool FreezeBruteforceKey;
 
-    // When set, output a Lv2 (game-playable) file by patching the original MPQ in-place.
+    // When set, output a Lv2 (game-playable) file through the static Freeze restore pipeline.
     private static bool Lv2Mode;
+
+    // When set, print Lv2 static-restore diagnostics without writing an output file.
+    private static bool Lv2DiagMode;
 
     private static readonly string[] CanonicalOrder =
     {
@@ -85,7 +88,8 @@ internal static partial class StarcraftMapUnprotector
         public string FreezeDumpPath;       // path for EUD trigger CSV debug dump
         public string FreezeApplyDumpPath;  // path for CE runtime binary dump (--apply-dump)
         public bool FreezeBruteforceKey;    // enable file-only triggerKey brute-force
-        public bool Lv2Mode;               // output game-playable file via in-place MPQ patching
+        public bool Lv2Mode;               // output game-playable file via static Freeze restore
+        public bool Lv2DiagMode;           // print static Freeze restore diagnostics only
     }
 
     private sealed class MpqFileEntry
@@ -114,6 +118,16 @@ internal static partial class StarcraftMapUnprotector
         public uint BlockTableOffset;
         public int HashCount;
         public int BlockCount;
+    }
+
+    private sealed class MpqTableLocation
+    {
+        public MpqHeaderCandidate Header;
+        public int HashOffset;
+        public int BlockOffset;
+        public HashTable[] Hashes;
+        public BlockTable[] Blocks;
+        public int ScenarioBlockIndex;
     }
 
     public static int Main(string[] args)
@@ -149,6 +163,11 @@ internal static partial class StarcraftMapUnprotector
             else if (args[i] == "--lv2")
             {
                 Lv2Mode = true;
+                FreezeBruteforceKey = true;
+            }
+            else if (args[i] == "--lv2-diag")
+            {
+                Lv2DiagMode = true;
                 FreezeBruteforceKey = true;
             }
             else
@@ -196,8 +215,8 @@ internal static partial class StarcraftMapUnprotector
             Console.WriteLine("                        to decrypt Freeze05-protected triggers.");
             Console.WriteLine("  --freeze-bruteforce-key");
             Console.WriteLine("                        Brute-force the final Freeze triggerKey from encrypted TRIG data.");
-            Console.WriteLine("  --lv2                 Output a game-playable (Lv2) file by patching the original MPQ");
-            Console.WriteLine("                        in-place. Preserves MPQ structure for Freeze05 EUD compatibility.");
+            Console.WriteLine("  --lv2                 Output a game-playable (Lv2) file using static Freeze05 restore.");
+            Console.WriteLine("  --lv2-diag            Print static Freeze05 restore diagnostics without writing output.");
             return 0;
         }
 
@@ -300,7 +319,9 @@ internal static partial class StarcraftMapUnprotector
             var stats = new Stats
             {
                 FreezeApplyDumpPath = ApplyDumpPath,
-                FreezeBruteforceKey = FreezeBruteforceKey
+                FreezeBruteforceKey = FreezeBruteforceKey,
+                Lv2Mode = Lv2Mode,
+                Lv2DiagMode = Lv2DiagMode
             };
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);
@@ -331,7 +352,18 @@ internal static partial class StarcraftMapUnprotector
                 throw new InvalidDataException("scenario.chk could not be parsed.");
             }
 
-            byte[] normalized = RawChkMode ? chk : BuildNormalizedChk(sections, stats);
+            if (Lv2DiagMode)
+            {
+                RunLv2Diagnostics(input, inputBytes, chk, stats);
+                usedDeepRecovery = stats.MpqDeepRecoveryUsed > 0;
+                return true;
+            }
+
+            byte[] normalized = RawChkMode
+                ? chk
+                : Lv2Mode && stats.IsFreezeProtected && !LooksLikeChk(inputBytes)
+                    ? BuildStaticLv2Chk(input, inputBytes, chk, stats)
+                    : BuildNormalizedChk(sections, stats);
             DumpChkSections(normalized);
             WriteStandardMpq(output, normalized, extraFiles, BuildFreezeBlob(stats));
             usedDeepRecovery = stats.MpqDeepRecoveryUsed > 0;

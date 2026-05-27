@@ -1,0 +1,286 @@
+Trigger Syntax
+
+Trigger("Players"){
+
+Conditions:
+
+	Accumulate("Players", At least/At most/Exactly, Resource Amount(#), Resource Type);
+
+	Always();
+
+	Bring("Players", "Unit Name", "Location", At least/At most/Exactly, Unit Amount(#));
+
+	Command("Players", "Unit Name", At least/At most/Exactly, Unit Amount(#));
+
+	Command the Least("Unit Name");
+
+	Command the Least At("Unit Name", "Location");
+
+	Command the Most("Unit Name");
+
+	Commands the Most At("Unit Name", "Location");
+
+	Countdown Timer(At least/At most/Exactly, Time in Seconds);
+
+	Deaths("Players", "Unit Name", At least/At most/Exactly, Deaths Amount(#));
+
+	Elapsed Time(At least/At most/Exactly, Time in seconds);
+
+	Highest Score(Score Type);
+
+	Kill("Players", "Unit Name", At least/At most/Exactly, Unit Amount(#));
+
+	Least Kills("Unit Name");
+
+	Least Resources(Resource Type);
+
+	Lowest Score(Score Type);
+
+	Most Kills("Unit Name");
+
+	Most Resources(Resource Type);
+
+	Never();
+
+	Opponents("Players", At least/At most/Exactly, Player Amount(#));
+
+	Score("Players", Score Type, At least/At most/Exactly, Score Amount(#));
+
+	Switch("Switch Name", set/not set);
+
+Actions:
+
+	Center View("Location");
+
+	Create Unit("Players", "Unit Name", Unit Amount(#), "Location");
+
+	Create Unit with Properties("Players", "Unit Name", Unit Amount(#), "Location", CUWP Slot(#));
+
+	Defeat();
+
+	Display Text Message(Always Display, "Text here");
+
+	Draw();
+
+	Give Units to Player("Units owned by Players", "Given to Players", "Unit Name", Unit Amount(#), "Location");
+
+	Kill Unit("Players", "Unit Name");
+
+	Leader Board Control At Location("Label", "Unit Name", "Location");
+
+	Leader Board Control("Label", "Unit Name");
+
+	Leaderboard Greed(Resource Amount(#));
+
+	Leader Board Kills("Label", "Unit Name");
+
+	Leader Board Points("Label", Score Type);
+
+	Leader Board Resources("Label", Resource Type);
+
+	Leaderboard Goal Control At Location("Label", "Unit Name", Goal Amount(#), "Location");
+
+	Leaderboard Goal Control("Label", "Unit Name", Goal Amount(#));
+
+	Leaderboard Goal Kills("Label", "Unit Name", Goal Amount(#));
+
+	Leaderboard Goal Points("Label", Score Type, Goal Amount(#));
+
+	Leaderboard Goal Resources("Label", Goal Amount(#), Resource Type);
+
+	Leaderboard Computer Players(State);
+
+	Minimap Ping("Location");
+
+	Modify Unit Energy("Players", "Unit Name", Energy%, Unit Amount(#), "Location");
+
+	Modify Unit Hanger Count("Players", "Unit Name", Hanger Amount(#) Added, Unit Amount(#), "Location");
+
+	Modify Unit Hit Points("Players", "Unit Name", Health%, Unit Amount(#), "Anywhere");
+
+	Modify Unit Resource Amount(#)("Players", Resource Amount(#), Unit Amount(#), "Location");
+
+	Modify Unit Shield Points("Players", "Unit Name", Shield%, Unit Amount(#), "Location");
+
+	Move Location("Players", "Unit Name", "Location moved", "Location");
+
+	Move Unit("Players", "Unit Name", Unit Amount(#), "Location from", "Location to");
+
+	Mute Unit Speech();
+
+	Order("Players", "Unit Name", "Location from", "Location to", Movement Type);
+
+	Pause Game();
+
+	Pause Timer();
+
+	Play WAV("WAV path", WAV length in ms);
+
+	Preserve Trigger();
+
+	Remove Unit("Players", "Unit Name");
+
+	Remove Unit At Location("Players", "Unit Name", Unit Amount(#), "Location");
+
+	Run AI Script("Script Name");
+
+	Run AI Script At Location("Script Name", "Location");
+
+	Set Alliance Status("Players", Alliance Status);
+
+	Set Countdown Timer(Edit Type, Time in Seconds);
+
+	Set Deaths("Players", "Unit Name", Edit Type, Death Amount(#));
+
+	Set Doodad State("Players", "Unit Name", "Location", State);
+
+	Set Invincibility("Players", "Unit Name", "Location", State);
+
+	Set Mission Objectives("Text here");
+
+	Set Next Scenario("Scenario name");
+
+	Set Resources("Players", Edit Type, Resource Amount(#), Resource Type);
+
+	Set Score("Players", Edit Type, Score Amount(#), Score Type);
+
+	Set Switch("Switch Name", set/clear/toggle/randomize);
+
+	Talking Portrait("Unit Name", Time in ms);
+
+	Transmission(Always Display, "Text here", "Unit Name", "Location", Edit Type, Time in ms, "WAV path", WAV length in ms);
+
+	Unmute Unit Speech();
+
+	Unpause Game();
+
+	Unpause Timer();
+
+	Victory();
+
+	Wait(Time in ms);
+}
+
+//-----------------------------------------------------------------//
+
+Briefing("Players"){
+	Display Speaking Portrait(Portrait location(#), Time in ms);
+
+	Hide Portrait(Portrait location(#));
+
+	Mission Objectives("Text here");
+
+	Play WAV("WAV path", WAV length in ms);
+
+	Show Portrait("Unit Name", Portrait location(#));
+
+	Text Message("Text here", Time in ms);
+
+	Transmission("Text here", Portrait location(#), Edit Type, Time in ms, "WAV path", WAV length in ms);
+
+	Wait(Time in ms);
+}
+
+//-----------------------------------------------------------------//
+
+
+Reference Lists:
+DO NOT WRITE WHAT IS IN PARENTHESIS
+
+Alliance Status:
+Enemy
+Ally
+Allied Victory
+
+Edit Types:
+Set To
+Add
+Subtract
+
+Movement Types:
+move
+patrol
+attack
+
+Unit Amounts:
+All
+0 (All)
+#
+
+States:
+enabled
+disabled
+toggle
+
+Resource Types:
+ore
+gas
+ore and gas
+
+Score Types:
+Total
+Units
+Buildings
+Units and buildings
+Kills
+Razings
+Kills and razings
+Custom
+
+Unit Names:
+Any unit
+Men
+Factories
+Specific Unit Name
+
+Players:
+Player #
+All players
+Current player
+Foes
+Allies
+Neutral players
+"Force Name"
+
+Text:
+Enter (aka Line Break) = \r\n\
+Quotation Mark = \"
+Backslash = \\
+
+Triggers Colored Text:
+Light blue (1) = <1>
+Light blue (2) = <2>
+Yellow = <3>
+White = <4>
+Grey = <5>
+Red = <6>
+Light green = <7>
+Invisible = <8>
+Overlap back (Center align) = <C>
+Overlap front (Right align) = <R>
+
+Forces Colored Text:
+Light blue (1) = <1>
+Light blue (2) = <2>
+Green = <3>
+Light green = <4>
+Grey = <5>
+White = <6>
+Red = <7>
+Invisible = <8>
+Overlap back (Center align) = <C>
+Overlap front (Right align) = <R>
+
+CUWP Slots:
+HP: (Health Points/Hit Points)
+SP: (Shield Points)
+EP: (Energy Points)
+Res: (Amount of Resources)
+Hangar Units: (Number of units in Hanger)
+
+Flags:
+BURROWED
+HALLUCINATED
+INVINCIBLE
+INTRANSIT
+CLOAKED

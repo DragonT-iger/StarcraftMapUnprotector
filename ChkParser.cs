@@ -53,6 +53,51 @@ internal static partial class StarcraftMapUnprotector
         return sections;
     }
 
+    private static byte[] BuildLv2Chk(byte[] chk, Stats stats)
+    {
+        byte[] result = (byte[])chk.Clone();
+        int pos = 0;
+        int trigSections = 0;
+
+        while (pos + 8 <= result.Length)
+        {
+            string name = Encoding.ASCII.GetString(result, pos, 4);
+            uint size32 = BitConverter.ToUInt32(result, pos + 4);
+            if (size32 > int.MaxValue)
+            {
+                break;
+            }
+
+            int size = (int)size32;
+            if (pos + 8 + size > result.Length)
+            {
+                break;
+            }
+
+            if (name == "TRIG" && size % FreezeTrigSize == 0)
+            {
+                byte[] trigData = new byte[size];
+                Buffer.BlockCopy(result, pos + 8, trigData, 0, trigData.Length);
+
+                var grouped = new Dictionary<string, List<byte[]>>(StringComparer.Ordinal);
+                grouped["TRIG"] = new List<byte[]> { trigData };
+                ProcessFreezeProtection(grouped, stats);
+
+                Buffer.BlockCopy(trigData, 0, result, pos + 8, trigData.Length);
+                trigSections++;
+            }
+
+            pos += 8 + size;
+        }
+
+        if (trigSections == 0)
+        {
+            Console.WriteLine("  WARNING: Lv2 mode did not find a TRIG section to patch.");
+        }
+
+        return result;
+    }
+
     private static bool IsPlausibleSectionName(string name)
     {
         if (name == "SMLP")

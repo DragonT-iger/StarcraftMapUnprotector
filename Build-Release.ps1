@@ -44,6 +44,7 @@ $sources = @(
     "ChkNormalizer.cs",
     "TerrainRepairer.cs",
     "FreezeDecryptor.cs",
+    "FreezeStaticRestorer.cs",
     "FreezeKeyRecovery.cs"
 ) | ForEach-Object { Join-Path $root $_ }
 

@@ -129,6 +129,11 @@ internal static partial class StarcraftMapUnprotector
 
     private static int DecryptAllFreezeTriggers(byte[] trigData, uint key)
     {
+        return DecryptAllFreezeTriggers(trigData, key, false);
+    }
+
+    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveLv2FlagPayload)
+    {
         int totalTriggers = trigData.Length / FreezeTrigSize;
         int decrypted = 0;
 
@@ -143,12 +148,13 @@ internal static partial class StarcraftMapUnprotector
             TryDecryptFreezeTrigger(trigData, offset, key, buf);
             Buffer.BlockCopy(buf, 0, trigData, offset, FreezeTrigSize);
 
-            uint restoredFlag = flag - 0x80000000u;
-            restoredFlag &= 0x0F;
+            uint restoredFlag = preserveLv2FlagPayload
+                ? flag - 0x80000000u
+                : (flag - 0x80000000u) & 0x0F;
             trigData[offset + 2368] = (byte)restoredFlag;
-            trigData[offset + 2369] = 0;
-            trigData[offset + 2370] = 0;
-            trigData[offset + 2371] = 0;
+            trigData[offset + 2369] = (byte)(restoredFlag >> 8);
+            trigData[offset + 2370] = (byte)(restoredFlag >> 16);
+            trigData[offset + 2371] = (byte)(restoredFlag >> 24);
 
             decrypted++;
         }
@@ -324,7 +330,7 @@ internal static partial class StarcraftMapUnprotector
                 {
                     Console.WriteLine("  Key 0x" + recoveredKey.ToString("X8") +
                                       " validated! Decrypting all triggers...");
-                    int keyDecrypted = DecryptAllFreezeTriggers(data, recoveredKey);
+                    int keyDecrypted = DecryptAllFreezeTriggers(data, recoveredKey, stats.Lv2Mode);
                     decrypted += keyDecrypted;
                     stats.DecryptedFreezeTriggers = decrypted;
                 }
@@ -394,7 +400,7 @@ internal static partial class StarcraftMapUnprotector
                                 {
                                     Console.WriteLine("  Key 0x" + recoveredKey.ToString("X8") +
                                                       " validated! Decrypting all triggers...");
-                                    int keyDecrypted = DecryptAllFreezeTriggers(data, recoveredKey);
+                                    int keyDecrypted = DecryptAllFreezeTriggers(data, recoveredKey, stats.Lv2Mode);
                                     decrypted += keyDecrypted;
                                     stats.DecryptedFreezeTriggers = decrypted;
                                 }

@@ -158,6 +158,36 @@ internal static partial class StarcraftMapUnprotector
         return null;
     }
 
+    private static byte[] TryExtractNamedMpqFile(string input, string name, Stats stats)
+    {
+        try
+        {
+            using (var mpq = new TkMPQ(input))
+            {
+                RecoverShiftedProtectedTables(input, mpq, stats);
+                PatchProtectedHashIndexes(mpq, stats);
+                byte[] data = TryReadMpqFile(mpq, name);
+                if (data != null)
+                {
+                    return data;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            byte[] file = File.ReadAllBytes(input);
+            return TryExtractNamedMpqFileFromRecoveredTables(file, name);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static byte[] TryRecoverScenarioChkAggressively(string input, Stats stats, out List<MpqFileEntry> extraFiles)
     {
         extraFiles = new List<MpqFileEntry>();
@@ -827,6 +857,465 @@ internal static partial class StarcraftMapUnprotector
             seed1 = AdvanceSeed1(seed1);
             seed2 = value + seed2 + (seed2 << 5) + 3;
         }
+    }
+
+    private static void EncryptMpqData(byte[] data, uint key)
+    {
+        uint seed1 = key;
+        uint seed2 = 0xEEEEEEEE;
+
+        for (int i = 0; i + 3 < data.Length; i += 4)
+        {
+            seed2 += CryptTable[0x400 + (seed1 & 0xFF)];
+            uint plain = BitConverter.ToUInt32(data, i);
+            uint encrypted = plain ^ (seed1 + seed2);
+            byte[] bytes = BitConverter.GetBytes(encrypted);
+            Buffer.BlockCopy(bytes, 0, data, i, 4);
+            seed1 = AdvanceSeed1(seed1);
+            seed2 = plain + seed2 + (seed2 << 5) + 3;
+        }
+    }
+
+    private static void WriteLv2Mpq(string originalPath, string output, byte[] newChk, byte[] trailingBlob)
+    {
+        string dir = Path.GetDirectoryName(output);
+        if (!string.IsNullOrEmpty(dir))
+        {
+            Directory.CreateDirectory(dir);
+        }
+
+        byte[] file = File.ReadAllBytes(originalPath);
+        MpqTableLocation tables = LocateScenarioTablesForPatch(file);
+        if (tables == null)
+        {
+            throw new InvalidDataException("Lv2 MPQ patch failed: scenario.chk block table entry was not found.");
+        }
+
+        BlockTable block = tables.Blocks[tables.ScenarioBlockIndex];
+        if (block.FileSize != (uint)newChk.Length)
+        {
+            throw new InvalidDataException(
+                "Lv2 MPQ patch refused to resize scenario.chk (" +
+                block.FileSize + " -> " + newChk.Length +
+                " bytes). Lv2 currently requires same-size CHK edits.");
+        }
+
+        int archiveLength = file.Length - tables.Header.BaseOffset;
+        if (!IsBlockInArchive(block, archiveLength))
+        {
+            throw new InvalidDataException("Lv2 MPQ patch failed: scenario.chk block is outside the archive.");
+        }
+
+        int sectorSize = GetMpqSectorSize(file, tables.Header.BaseOffset);
+        bool encrypted = (((uint)block.Flags & (uint)Flags.Encrypted) != 0);
+        uint fileKey = Encryption.HashString("staredit\\scenario.chk", Encryption.HashType.Hash_FileKey);
+        if (encrypted && (((uint)block.Flags & (uint)Flags.ModKey) != 0))
+        {
+            fileKey = (fileKey + (uint)block.FileOffset) ^ block.FileSize;
+        }
+
+        bool compress = (((uint)block.Flags & (uint)Flags.Compressed) != 0) ||
+                        (((uint)block.Flags & (uint)Flags.Imploded) != 0);
+        byte[] packed = BuildMpqFileBlock(newChk, sectorSize, compress, encrypted, fileKey);
+
+        if (packed.Length > block.CompSize)
+        {
+            throw new InvalidDataException(
+                "Lv2 MPQ patch needs " + packed.Length +
+                " bytes, but the original scenario.chk block has only " +
+                block.CompSize + " bytes. Refusing to move MPQ data because Freeze05 keycalc is structure-sensitive.");
+        }
+
+        int blockOffset = tables.Header.BaseOffset + block.FileOffset;
+        Buffer.BlockCopy(packed, 0, file, blockOffset, packed.Length);
+        Array.Clear(file, blockOffset + packed.Length, (int)block.CompSize - packed.Length);
+
+        File.WriteAllBytes(output, file);
+        Console.WriteLine("Lv2 MPQ patch           : in-place scenario.chk block");
+        Console.WriteLine("  table hash/block      : 0x" + tables.HashOffset.ToString("X") +
+                          " / 0x" + tables.BlockOffset.ToString("X"));
+        Console.WriteLine("  scenario block        : #" + tables.ScenarioBlockIndex +
+                          " at 0x" + blockOffset.ToString("X"));
+        Console.WriteLine("  scenario.chk packed   : " + packed.Length + " / " + block.CompSize + " bytes");
+    }
+
+    private static MpqTableLocation LocateScenarioTablesForPatch(byte[] file)
+    {
+        List<MpqHeaderCandidate> headers = FindMpqHeaderCandidates(file);
+        foreach (MpqHeaderCandidate header in headers)
+        {
+            var hashCandidates = new List<int>();
+            AddFixedHashCandidates(hashCandidates, file.Length, header.BaseOffset, header.HashTableOffset, header.HashCount);
+            hashCandidates.AddRange(FindHashTableByPattern(file, header.BaseOffset + 32, header.HashCount));
+            hashCandidates = hashCandidates.Distinct().ToList();
+
+            foreach (int hashOffset in hashCandidates)
+            {
+                HashTable[] hashes;
+                try
+                {
+                    hashes = ReadHashTable(file, hashOffset, header.HashCount);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (!hashes.Any(IsScenarioHash))
+                {
+                    continue;
+                }
+
+                List<int> blockCandidates = BuildAdjacentBlockCandidates(
+                    file,
+                    hashOffset,
+                    header.HashCount,
+                    header.BlockTableOffset,
+                    header.BlockCount,
+                    header.BaseOffset);
+
+                foreach (int blockOffset in blockCandidates)
+                {
+                    BlockTable[] blocks;
+                    try
+                    {
+                        blocks = ReadBlockTable(file, blockOffset, header.BlockCount);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    FixProtectedBlockSizes(blocks, file.Length - header.BaseOffset);
+                    int scenarioBlock = FindUsableScenarioBlock(hashes, blocks);
+                    if (scenarioBlock < 0 || !IsBlockInArchive(blocks[scenarioBlock], file.Length - header.BaseOffset))
+                    {
+                        continue;
+                    }
+
+                    return new MpqTableLocation
+                    {
+                        Header = header,
+                        HashOffset = hashOffset,
+                        BlockOffset = blockOffset,
+                        Hashes = hashes,
+                        Blocks = blocks,
+                        ScenarioBlockIndex = scenarioBlock
+                    };
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static byte[] TryExtractNamedMpqFileFromRecoveredTables(byte[] file, string name)
+    {
+        MpqTableLocation tables = LocateFileTablesForPatch(file, name);
+        if (tables == null)
+        {
+            return null;
+        }
+
+        BlockTable block = tables.Blocks[tables.ScenarioBlockIndex];
+        int archiveLength = file.Length - tables.Header.BaseOffset;
+        if (!IsBlockInArchive(block, archiveLength))
+        {
+            return null;
+        }
+
+        int blockOffset = tables.Header.BaseOffset + block.FileOffset;
+        int compressedSize = (int)block.CompSize;
+        if (compressedSize <= 0 || blockOffset < 0 || blockOffset + compressedSize > file.Length)
+        {
+            return null;
+        }
+
+        byte[] raw = new byte[compressedSize];
+        Buffer.BlockCopy(file, blockOffset, raw, 0, raw.Length);
+
+        int expectedSize = block.FileSize > Int32.MaxValue ? 0 : (int)block.FileSize;
+        int sectorSize = GetMpqSectorSize(file, tables.Header.BaseOffset);
+        bool encrypted = (((uint)block.Flags & (uint)Flags.Encrypted) != 0);
+        bool compressed = (((uint)block.Flags & (uint)Flags.Compressed) != 0) ||
+                          (((uint)block.Flags & (uint)Flags.Imploded) != 0);
+
+        if (encrypted)
+        {
+            uint key = Encryption.HashString(name, Encryption.HashType.Hash_FileKey);
+            if ((((uint)block.Flags & (uint)Flags.ModKey) != 0) && expectedSize > 0)
+            {
+                key = (key + (uint)block.FileOffset) ^ (uint)expectedSize;
+            }
+
+            if (compressed)
+            {
+                return TryDecryptAndDecompressMpqFile(raw, key, expectedSize, sectorSize);
+            }
+
+            DecryptMpqData(raw, key);
+            return TrimToExpectedSize(raw, expectedSize);
+        }
+
+        if (compressed)
+        {
+            return TryDecompressUnencryptedMpqFile(raw, expectedSize, sectorSize);
+        }
+
+        return TrimToExpectedSize(raw, expectedSize);
+    }
+
+    private static MpqTableLocation LocateFileTablesForPatch(byte[] file, string name)
+    {
+        List<MpqHeaderCandidate> headers = FindMpqHeaderCandidates(file);
+        foreach (MpqHeaderCandidate header in headers)
+        {
+            var hashCandidates = new List<int>();
+            AddFixedHashCandidates(hashCandidates, file.Length, header.BaseOffset, header.HashTableOffset, header.HashCount);
+            hashCandidates.AddRange(FindHashTableByPattern(file, header.BaseOffset + 32, header.HashCount));
+            hashCandidates = hashCandidates.Distinct().ToList();
+
+            foreach (int hashOffset in hashCandidates)
+            {
+                HashTable[] hashes;
+                try
+                {
+                    hashes = ReadHashTable(file, hashOffset, header.HashCount);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                int blockIndex = FindUsableNamedBlock(name, hashes, null);
+                if (blockIndex < 0)
+                {
+                    continue;
+                }
+
+                List<int> blockCandidates = BuildAdjacentBlockCandidates(
+                    file,
+                    hashOffset,
+                    header.HashCount,
+                    header.BlockTableOffset,
+                    header.BlockCount,
+                    header.BaseOffset);
+
+                foreach (int blockOffset in blockCandidates)
+                {
+                    BlockTable[] blocks;
+                    try
+                    {
+                        blocks = ReadBlockTable(file, blockOffset, header.BlockCount);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    FixProtectedBlockSizes(blocks, file.Length - header.BaseOffset);
+                    blockIndex = FindUsableNamedBlock(name, hashes, blocks);
+                    if (blockIndex < 0 || !IsBlockInArchive(blocks[blockIndex], file.Length - header.BaseOffset))
+                    {
+                        continue;
+                    }
+
+                    return new MpqTableLocation
+                    {
+                        Header = header,
+                        HashOffset = hashOffset,
+                        BlockOffset = blockOffset,
+                        Hashes = hashes,
+                        Blocks = blocks,
+                        ScenarioBlockIndex = blockIndex
+                    };
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static int FindUsableNamedBlock(string name, HashTable[] hashes, BlockTable[] blocks)
+    {
+        uint nameA = Encryption.HashString(name, Encryption.HashType.Hash_Name_A);
+        uint nameB = Encryption.HashString(name, Encryption.HashType.Hash_Name_B);
+
+        foreach (HashTable hash in hashes)
+        {
+            if (hash.NameA != nameA || hash.NameB != nameB)
+            {
+                continue;
+            }
+
+            if (blocks == null)
+            {
+                return hash.BlockTable >= 0 ? hash.BlockTable : -1;
+            }
+
+            if (IsUsableBlockIndex(hash.BlockTable, blocks))
+            {
+                return hash.BlockTable;
+            }
+        }
+
+        return -1;
+    }
+
+    private static byte[] TryDecompressUnencryptedMpqFile(byte[] raw, int expectedSize, int sectorSize)
+    {
+        if (raw == null)
+        {
+            return null;
+        }
+
+        if (expectedSize > 0 && raw.Length == expectedSize)
+        {
+            return (byte[])raw.Clone();
+        }
+
+        int sectorCount = expectedSize > 0 && sectorSize > 0
+            ? Math.Max(1, (expectedSize + sectorSize - 1) / sectorSize)
+            : 1;
+        int tableEntries = sectorCount + 1;
+        int tableBytes = tableEntries * 4;
+
+        if (sectorCount <= 1 || tableBytes > raw.Length)
+        {
+            byte[] single = DecompressMpqSector(raw);
+            return single != null ? TrimToExpectedSize(single, expectedSize) : TrimToExpectedSize(raw, expectedSize);
+        }
+
+        var offsets = new int[tableEntries];
+        for (int i = 0; i < tableEntries; i++)
+        {
+            uint offset = BitConverter.ToUInt32(raw, i * 4);
+            if (offset > raw.Length || (i > 0 && offset < offsets[i - 1]))
+            {
+                byte[] single = DecompressMpqSector(raw);
+                return single != null ? TrimToExpectedSize(single, expectedSize) : TrimToExpectedSize(raw, expectedSize);
+            }
+
+            offsets[i] = (int)offset;
+        }
+
+        try
+        {
+            using (var output = new MemoryStream(expectedSize > 0 ? expectedSize : 0))
+            {
+                for (int i = 0; i < sectorCount; i++)
+                {
+                    int start = offsets[i];
+                    int end = offsets[i + 1];
+                    if (end <= start || end > raw.Length)
+                    {
+                        return null;
+                    }
+
+                    byte[] sector = new byte[end - start];
+                    Buffer.BlockCopy(raw, start, sector, 0, sector.Length);
+                    byte[] decompressed = DecompressMpqSector(sector) ?? sector;
+                    output.Write(decompressed, 0, decompressed.Length);
+                }
+
+                return TrimToExpectedSize(output.ToArray(), expectedSize);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static byte[] TrimToExpectedSize(byte[] data, int expectedSize)
+    {
+        if (data == null || expectedSize <= 0 || data.Length == expectedSize)
+        {
+            return data;
+        }
+
+        if (data.Length < expectedSize)
+        {
+            return data;
+        }
+
+        byte[] trimmed = new byte[expectedSize];
+        Buffer.BlockCopy(data, 0, trimmed, 0, trimmed.Length);
+        return trimmed;
+    }
+
+    private static byte[] BuildMpqFileBlock(byte[] data, int sectorSize, bool compress, bool encrypted, uint key)
+    {
+        if (!compress)
+        {
+            byte[] stored = (byte[])data.Clone();
+            if (encrypted)
+            {
+                EncryptMpqData(stored, key);
+            }
+
+            return stored;
+        }
+
+        int sectorCount = Math.Max(1, (data.Length + sectorSize - 1) / sectorSize);
+        int tableBytes = (sectorCount + 1) * 4;
+        var sectors = new List<byte[]>(sectorCount);
+
+        for (int i = 0; i < sectorCount; i++)
+        {
+            int offset = i * sectorSize;
+            int length = Math.Min(sectorSize, data.Length - offset);
+            byte[] raw = new byte[length];
+            Buffer.BlockCopy(data, offset, raw, 0, raw.Length);
+
+            byte[] sector = compress ? CompressMpqSector(raw) : raw;
+            if (encrypted)
+            {
+                EncryptMpqData(sector, key + (uint)i);
+            }
+
+            sectors.Add(sector);
+        }
+
+        byte[] offsetTable = new byte[tableBytes];
+        int sectorOffset = tableBytes;
+        for (int i = 0; i < sectors.Count; i++)
+        {
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)sectorOffset), 0, offsetTable, i * 4, 4);
+            sectorOffset += sectors[i].Length;
+        }
+        Buffer.BlockCopy(BitConverter.GetBytes((uint)sectorOffset), 0, offsetTable, sectors.Count * 4, 4);
+
+        if (encrypted)
+        {
+            EncryptMpqData(offsetTable, key - 1);
+        }
+
+        using (var ms = new MemoryStream(sectorOffset))
+        {
+            ms.Write(offsetTable, 0, offsetTable.Length);
+            foreach (byte[] sector in sectors)
+            {
+                ms.Write(sector, 0, sector.Length);
+            }
+
+            return ms.ToArray();
+        }
+    }
+
+    private static byte[] CompressMpqSector(byte[] raw)
+    {
+        byte[] source = (byte[])raw.Clone();
+        byte[] destination = new byte[Math.Max(raw.Length + 1024, raw.Length * 2 + 1)];
+        int length = Compressions.Compress(ref destination, ref source, Compression.Implode, 0);
+        if (length <= 0 || length > destination.Length)
+        {
+            return raw;
+        }
+
+        byte[] result = new byte[length];
+        Buffer.BlockCopy(destination, 0, result, 0, result.Length);
+        return result;
     }
 
     private static byte[] TryScanRawChk(byte[] file)
