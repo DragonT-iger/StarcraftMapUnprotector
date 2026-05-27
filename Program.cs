@@ -211,8 +211,8 @@ internal static partial class StarcraftMapUnprotector
             Console.WriteLine("Options:");
             Console.WriteLine("  --no-pause            Close immediately when finished.");
             Console.WriteLine("  --raw-chk             Repack CHK as-is without normalization.");
-            Console.WriteLine("  --apply-dump <file>   Apply Cheat Engine runtime dump (freeze_dump.lua output)");
-            Console.WriteLine("                        to decrypt Freeze05-protected triggers.");
+            Console.WriteLine("  --apply-dump <file>   Legacy diagnostic: apply a runtime trigger dump.");
+            Console.WriteLine("                        Not reliable for Lv2 because Freeze re-encrypts every frame.");
             Console.WriteLine("  --freeze-bruteforce-key");
             Console.WriteLine("                        Brute-force the final Freeze triggerKey from encrypted TRIG data.");
             Console.WriteLine("  --lv2                 Output a game-playable (Lv2) file using static Freeze05 restore.");
