@@ -876,6 +876,15 @@ internal static partial class StarcraftMapUnprotector
         }
     }
 
+    private sealed class Lv2MpqPatchResult
+    {
+        public byte[] File;
+        public MpqTableLocation Tables;
+        public int BlockOffset;
+        public int PackedLength;
+        public int OriginalCompSize;
+    }
+
     private static void WriteLv2Mpq(string originalPath, string output, byte[] newChk, byte[] trailingBlob)
     {
         string dir = Path.GetDirectoryName(output);
@@ -885,6 +894,19 @@ internal static partial class StarcraftMapUnprotector
         }
 
         byte[] file = File.ReadAllBytes(originalPath);
+        Lv2MpqPatchResult result = BuildLv2MpqPatch(file, newChk);
+        File.WriteAllBytes(output, result.File);
+        Console.WriteLine("Lv2 MPQ patch           : in-place scenario.chk block");
+        Console.WriteLine("  table hash/block      : 0x" + result.Tables.HashOffset.ToString("X") +
+                          " / 0x" + result.Tables.BlockOffset.ToString("X"));
+        Console.WriteLine("  scenario block        : #" + result.Tables.ScenarioBlockIndex +
+                          " at 0x" + result.BlockOffset.ToString("X"));
+        Console.WriteLine("  scenario.chk packed   : " + result.PackedLength + " / " + result.OriginalCompSize + " bytes");
+    }
+
+    private static Lv2MpqPatchResult BuildLv2MpqPatch(byte[] originalFile, byte[] newChk)
+    {
+        byte[] file = (byte[])originalFile.Clone();
         MpqTableLocation tables = LocateScenarioTablesForPatch(file);
         if (tables == null)
         {
@@ -930,13 +952,14 @@ internal static partial class StarcraftMapUnprotector
         Buffer.BlockCopy(packed, 0, file, blockOffset, packed.Length);
         Array.Clear(file, blockOffset + packed.Length, (int)block.CompSize - packed.Length);
 
-        File.WriteAllBytes(output, file);
-        Console.WriteLine("Lv2 MPQ patch           : in-place scenario.chk block");
-        Console.WriteLine("  table hash/block      : 0x" + tables.HashOffset.ToString("X") +
-                          " / 0x" + tables.BlockOffset.ToString("X"));
-        Console.WriteLine("  scenario block        : #" + tables.ScenarioBlockIndex +
-                          " at 0x" + blockOffset.ToString("X"));
-        Console.WriteLine("  scenario.chk packed   : " + packed.Length + " / " + block.CompSize + " bytes");
+        return new Lv2MpqPatchResult
+        {
+            File = file,
+            Tables = tables,
+            BlockOffset = blockOffset,
+            PackedLength = packed.Length,
+            OriginalCompSize = (int)block.CompSize
+        };
     }
 
     private static MpqTableLocation LocateScenarioTablesForPatch(byte[] file)

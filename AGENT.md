@@ -67,7 +67,7 @@ VER -> TYPE -> IVE2 -> VCOD -> IOWN -> OWNR -> SIDE -> COLR -> ERA -> DIM -> MTX
 | `Docs/Architecture/file-map.md` | 소스 파일별 책임, 도구/의존성 구조 |
 | `Docs/Formats/chk-sections.md` | CHK 섹션 구조와 정규화 규칙 |
 | `Docs/Formats/mpq-protection.md` | MPQ 보호/손상 패턴과 복구 전략 |
-| `Docs/Formats/freeze05-protection.md` | Freeze05 보호 방식, 복호화/복원 전략 |
+| `Docs/Formats/freeze05-protection.md` | Freeze05 색인 및 세부 문서 진입점 |
 | `Docs/Dev/dev-notes.md` | 빌드, 테스트, 디버깅, 개발 워크플로 |
 | `Docs/Text Trigedit *.txt` | Text Trigedit 관련 원문 참고 자료 |
 
@@ -107,7 +107,7 @@ StarcraftMapUnprotector.exe [input] [output] [--no-pause] [--raw-chk] [--apply-d
 | 파이프라인 흐름 변경 | `Docs/Architecture/pipeline.md` |
 | 파일 추가/삭제/역할 변경 | `Docs/Architecture/file-map.md` |
 | CHK 섹션 처리 변경 | `Docs/Formats/chk-sections.md` |
-| 보호 기법 대응 추가/변경 | `Docs/Formats/mpq-protection.md`, `Docs/Formats/freeze05-protection.md` |
+| 보호 기법 대응 추가/변경 | `Docs/Formats/mpq-protection.md`, `Docs/Formats/freeze05-protection.md`, `Docs/Formats/Freeze05/*` |
 | 빌드/테스트/디버깅 방법 변경 | `Docs/Dev/dev-notes.md` |
 | CLI 옵션 추가/변경 | 이 파일(`AGENT.md`)의 CLI Usage 섹션과 `Docs/Dev/dev-notes.md` |
 | 아키텍처/구조 변경 | 이 파일(`AGENT.md`)의 Architecture 섹션과 `Docs/Architecture/*` |

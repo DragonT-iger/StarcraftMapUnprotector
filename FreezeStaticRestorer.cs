@@ -42,6 +42,23 @@ internal static partial class StarcraftMapUnprotector
         public uint Address;
     }
 
+    private sealed class KeycalcInputSegment
+    {
+        public string Name;
+        public int Offset;
+        public int Length;
+    }
+
+    private sealed class StaticKeycalcResult
+    {
+        public uint[] SeedKey;
+        public uint CryptKeyVal;
+        public int HeaderSamples;
+        public int HashSamples;
+        public int ScenarioSamples;
+        public int TableWalkSamples;
+    }
+
     private static byte[] BuildStaticLv2Chk(string input, byte[] inputBytes, byte[] chk, Stats stats)
     {
         byte[] trigData;
@@ -169,8 +186,10 @@ internal static partial class StarcraftMapUnprotector
                     uint triggerKeyVal = FreezeUnmix2(recoveredKey, cryptKeyVal);
                     Console.WriteLine("cryptKeyVal(seed)    : 0x" + cryptKeyVal.ToString("X8"));
                     Console.WriteLine("triggerKeyVal        : 0x" + triggerKeyVal.ToString("X8") +
-                                      " (derived by unmix2(recovered, cryptKeyVal))");
+                        " (derived by unmix2(recovered, cryptKeyVal))");
                 }
+
+                PrintLv2KeycalcInputDiff(inputBytes, chk, trigData, recoveredKey);
             }
             else
             {
@@ -184,6 +203,434 @@ internal static partial class StarcraftMapUnprotector
         Console.WriteLine("offset decrypt cryptKey/tKeys: pending oJumperArray + initOffsets random-r recovery");
         Console.WriteLine("offset decrypt formula       : plainNext = (encryptedNext ^ cryptKey2), cryptKey2 += 0x" +
                           FreezeOffsetCryptStep.ToString("X8") + " per oJumper entry");
+    }
+
+    private static void PrintLv2KeycalcInputDiff(byte[] inputBytes, byte[] chk, byte[] trigData, uint recoveredKey)
+    {
+        if (LooksLikeChk(inputBytes))
+        {
+            Console.WriteLine("keycalc input diff     : skipped for raw CHK input");
+            return;
+        }
+
+        try
+        {
+            byte[] lv2Trig = (byte[])trigData.Clone();
+            DecryptAllFreezeTriggers(lv2Trig, recoveredKey, false);
+            byte[] lv2Chk = ReplaceTrigSection(chk, lv2Trig);
+            Lv2MpqPatchResult patch = BuildLv2MpqPatch(inputBytes, lv2Chk);
+
+            PrintKeycalcCandidateDiff(inputBytes, patch.File, patch.Tables);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("keycalc input diff     : error: " + ex.Message);
+        }
+    }
+
+    private static void PrintKeycalcCandidateDiff(byte[] originalFile, byte[] patchedFile, MpqTableLocation tables)
+    {
+        Console.WriteLine("keycalc candidate diff : original MPQ vs Lv2 patched MPQ");
+
+        var segments = new List<KeycalcInputSegment>();
+        BlockTable block = tables.Blocks[tables.ScenarioBlockIndex];
+        int scenarioOffset = tables.Header.BaseOffset + block.FileOffset;
+        int scenarioLength = (int)block.CompSize;
+
+        AddKeycalcSegment(segments, "mpq header", tables.Header.BaseOffset, 32, originalFile.Length);
+        AddKeycalcSegment(segments, "hash table raw", tables.HashOffset, tables.Header.HashCount * 16, originalFile.Length);
+        AddRawTableSegment(segments, "block table raw", tables.BlockOffset, tables.Header.BlockCount * 16,
+            originalFile.Length, tables.Header.BaseOffset, scenarioOffset, scenarioLength);
+        AddKeycalcSegment(segments, "scenario.chk raw block", scenarioOffset, (int)block.CompSize, originalFile.Length);
+
+        int changedSegments = 0;
+        foreach (KeycalcInputSegment segment in segments)
+        {
+            int firstDiff = FindFirstDiff(originalFile, patchedFile, segment.Offset, segment.Length);
+            bool changed = firstDiff >= 0;
+            if (changed)
+            {
+                changedSegments++;
+            }
+
+            uint oldHash = Fnv1a32(originalFile, segment.Offset, segment.Length);
+            uint newHash = Fnv1a32(patchedFile, segment.Offset, segment.Length);
+            Console.WriteLine("  " + segment.Name.PadRight(22) +
+                              " off=0x" + segment.Offset.ToString("X8") +
+                              " len=" + segment.Length +
+                              " hash " + oldHash.ToString("X8") + " -> " + newHash.ToString("X8") +
+                              (changed ? " firstDiff=+0x" + (firstDiff - segment.Offset).ToString("X") : " unchanged"));
+        }
+
+        PrintScenarioSectorDiff(originalFile, patchedFile, tables);
+        PrintStaticKeycalcCandidate(originalFile, patchedFile, tables);
+        Console.WriteLine("keycalc changed regions: " + changedSegments + " / " + segments.Count +
+                          " candidate top-level region(s)");
+    }
+
+    private static void PrintStaticKeycalcCandidate(byte[] originalFile, byte[] patchedFile, MpqTableLocation tables)
+    {
+        if (tables == null || tables.Header == null || tables.Blocks == null)
+        {
+            return;
+        }
+
+        try
+        {
+            BlockTable scenario = tables.Blocks[tables.ScenarioBlockIndex];
+            StaticKeycalcResult original = ComputeStaticKeycalcCandidate(
+                originalFile,
+                tables,
+                scenario,
+                tables.Header.HashTableOffset,
+                tables.Header.BlockTableOffset);
+            StaticKeycalcResult patched = ComputeStaticKeycalcCandidate(
+                patchedFile,
+                tables,
+                scenario,
+                tables.Header.HashTableOffset,
+                tables.Header.BlockTableOffset);
+
+            Console.WriteLine("  static keycalc model  seed " + FormatKey(original.SeedKey) +
+                              " -> " + FormatKey(patched.SeedKey));
+            Console.WriteLine("  static keycalc model  cryptKeyVal 0x" + original.CryptKeyVal.ToString("X8") +
+                              " -> 0x" + patched.CryptKeyVal.ToString("X8") +
+                              (original.CryptKeyVal == patched.CryptKeyVal ? " unchanged" : " changed"));
+            Console.WriteLine("  static keycalc samples header/hash/scenario/tablewalk: " +
+                              original.HeaderSamples + "/" + original.HashSamples + "/" +
+                              original.ScenarioSamples + "/" + original.TableWalkSamples);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("  static keycalc model  error: " + ex.Message);
+        }
+    }
+
+    private static StaticKeycalcResult ComputeStaticKeycalcCandidate(
+        byte[] file,
+        MpqTableLocation tables,
+        BlockTable scenario,
+        uint headerHashOffset,
+        uint headerBlockOffset)
+    {
+        uint[] seed = DetectFreezeSeedKey(file);
+        var result = new StaticKeycalcResult
+        {
+            SeedKey = seed
+        };
+
+        int headerOffset = tables.Header.BaseOffset;
+        for (int i = 0; i < 8; i++)
+        {
+            uint sample;
+            if (TryReadUInt32At(file, headerOffset + i * 4, out sample))
+            {
+                FeedKeycalcSample(seed, sample);
+                result.HeaderSamples++;
+            }
+        }
+
+        int hashOffset = tables.HashOffset;
+        if (IsPlausibleRawSpan(hashOffset, tables.Header.HashCount * 16, file.Length, tables.Header.BaseOffset))
+        {
+            for (int i = 0; i < tables.Header.HashCount * 4; i++)
+            {
+                uint sample;
+                if (TryReadUInt32At(file, hashOffset + i * 4, out sample))
+                {
+                    FeedKeycalcSample(seed, sample);
+                    result.HashSamples++;
+                }
+            }
+        }
+
+        int blockOffset = tables.BlockOffset;
+        if (IsPlausibleRawSpan(blockOffset, tables.Header.BlockCount * 16, file.Length, tables.Header.BaseOffset))
+        {
+            int startBlock = Math.Max(0, Math.Min(tables.ScenarioBlockIndex, tables.Header.BlockCount - 1));
+            for (int i = startBlock * 4; i < tables.Header.BlockCount * 4; i++)
+            {
+                uint sample;
+                if (TryReadUInt32At(file, blockOffset + i * 4, out sample))
+                {
+                    FeedKeycalcSample(seed, sample);
+                    result.TableWalkSamples++;
+                }
+            }
+
+            int sampleCount = Math.Min(512, tables.Header.BlockCount * 4);
+            uint cursor = 0;
+            for (int keyIndex = 0; keyIndex < 4; keyIndex++)
+            {
+                for (int j = 0; j < sampleCount; j++)
+                {
+                    int dwordIndex = (int)(cursor % (uint)Math.Max(1, tables.Header.BlockCount * 4));
+                    uint sample;
+                    if (TryReadUInt32At(file, blockOffset + dwordIndex * 4, out sample))
+                    {
+                        seed[keyIndex] = unchecked(seed[keyIndex] + seed[keyIndex] + sample);
+                    }
+
+                    cursor = FreezeMix2(cursor, (uint)j);
+                }
+            }
+        }
+
+        int scenarioOffset = tables.Header.BaseOffset + scenario.FileOffset;
+        int scenarioLength = scenario.CompSize > Int32.MaxValue ? 0 : (int)scenario.CompSize;
+        if (scenarioLength > 0 && IsPlausibleRawSpan(scenarioOffset, scenarioLength, file.Length, tables.Header.BaseOffset))
+        {
+            int sectorSize = GetMpqSectorSize(file, tables.Header.BaseOffset);
+            int fileSize = scenario.FileSize > Int32.MaxValue ? 0 : (int)scenario.FileSize;
+            int sectorCount = sectorSize > 0 && fileSize > 0
+                ? Math.Max(1, (fileSize + sectorSize - 1) / sectorSize)
+                : 1;
+            int tableBytes = (sectorCount + 1) * 4;
+            byte[] offsets = sectorCount > 1 && tableBytes <= scenarioLength
+                ? ReadScenarioSectorOffsetTable(file, scenarioOffset, tableBytes, scenario)
+                : null;
+
+            if (offsets != null)
+            {
+                for (int sector = 0; sector < sectorCount; sector += 3)
+                {
+                    int start = (int)BitConverter.ToUInt32(offsets, sector * 4);
+                    if (start >= 0 && start + 4 <= scenarioLength)
+                    {
+                        FeedKeycalcSample(seed, BitConverter.ToUInt32(file, scenarioOffset + start));
+                        result.ScenarioSamples++;
+                    }
+                }
+            }
+            else
+            {
+                for (int offset = 0; offset + 4 <= scenarioLength; offset += 4096 * 3)
+                {
+                    FeedKeycalcSample(seed, BitConverter.ToUInt32(file, scenarioOffset + offset));
+                    result.ScenarioSamples++;
+                }
+            }
+        }
+
+        for (int i = 0; i < 64; i++)
+        {
+            seed[0] = FreezeMix2(seed[0], seed[3]);
+            seed[1] = FreezeMix2(seed[1], seed[0]);
+            seed[2] = FreezeMix2(seed[2], seed[1]);
+        }
+
+        if (IsPlausibleRawSpan(blockOffset, tables.Header.BlockCount * 16, file.Length, tables.Header.BaseOffset))
+        {
+            int tail = blockOffset + tables.Header.BlockCount * 16;
+            for (int i = 0; i < 4; i++)
+            {
+                uint sample;
+                if (TryReadUInt32At(file, tail + i * 4, out sample))
+                {
+                    seed[i] = FreezeMix2(seed[i], sample);
+                }
+            }
+        }
+
+        result.CryptKeyVal = ComputeCryptKeyVal(seed);
+        return result;
+    }
+
+    private static uint[] DetectFreezeSeedKey(byte[] file)
+    {
+        uint[] seedKey;
+        uint[] destKey;
+        if (DetectFreezeProtection(file, out seedKey, out destKey) && seedKey != null && seedKey.Length >= 4)
+        {
+            return (uint[])seedKey.Clone();
+        }
+
+        return new uint[4];
+    }
+
+    private static void FeedKeycalcSample(uint[] seed, uint sample)
+    {
+        seed[0] = FreezeMix2(seed[0], sample);
+        seed[1] = FreezeMix2(seed[1], seed[0]);
+        seed[2] = FreezeMix2(seed[2], seed[1]);
+        seed[3] = FreezeMix2(seed[3], seed[2]);
+    }
+
+    private static bool TryReadUInt32At(byte[] data, int offset, out uint value)
+    {
+        value = 0;
+        if (offset < 0 || offset + 4 > data.Length)
+        {
+            return false;
+        }
+
+        value = BitConverter.ToUInt32(data, offset);
+        return true;
+    }
+
+    private static bool IsPlausibleRawSpan(int offset, int length, int fileLength, int headerBase)
+    {
+        return offset >= headerBase &&
+               length > 0 &&
+               offset + length >= offset &&
+               offset + length <= fileLength;
+    }
+
+    private static void AddRawTableSegment(
+        List<KeycalcInputSegment> segments,
+        string name,
+        int offset,
+        int length,
+        int fileLength,
+        int headerBase,
+        int scenarioOffset,
+        int scenarioLength)
+    {
+        bool plausible = offset >= headerBase + 32 &&
+                         length > 0 &&
+                         offset + length <= fileLength &&
+                         !RangesOverlap(offset, length, scenarioOffset, scenarioLength);
+        if (!plausible)
+        {
+            Console.WriteLine("  " + name.PadRight(22) +
+                              " skipped: recovered logical table does not map to a plausible raw table span");
+            return;
+        }
+
+        AddKeycalcSegment(segments, name, offset, length, fileLength);
+    }
+
+    private static void PrintScenarioSectorDiff(byte[] originalFile, byte[] patchedFile, MpqTableLocation tables)
+    {
+        BlockTable block = tables.Blocks[tables.ScenarioBlockIndex];
+        int scenarioOffset = tables.Header.BaseOffset + block.FileOffset;
+        int length = (int)block.CompSize;
+        if (length <= 0 || scenarioOffset < 0 || scenarioOffset + length > originalFile.Length)
+        {
+            return;
+        }
+
+        int sectorSize = GetMpqSectorSize(originalFile, tables.Header.BaseOffset);
+        int fileSize = block.FileSize > Int32.MaxValue ? 0 : (int)block.FileSize;
+        int sectorCount = sectorSize > 0 && fileSize > 0
+            ? Math.Max(1, (fileSize + sectorSize - 1) / sectorSize)
+            : 1;
+        int tableBytes = (sectorCount + 1) * 4;
+        if (sectorCount <= 1 || tableBytes > length)
+        {
+            return;
+        }
+
+        byte[] oldOffsets = ReadScenarioSectorOffsetTable(originalFile, scenarioOffset, tableBytes, block);
+        byte[] newOffsets = ReadScenarioSectorOffsetTable(patchedFile, scenarioOffset, tableBytes, block);
+        if (oldOffsets == null || newOffsets == null)
+        {
+            Console.WriteLine("  scenario sectors      offset table unreadable");
+            return;
+        }
+
+        int changed = 0;
+        int firstChanged = -1;
+        for (int i = 0; i < sectorCount; i++)
+        {
+            int oldStart = (int)BitConverter.ToUInt32(oldOffsets, i * 4);
+            int oldEnd = (int)BitConverter.ToUInt32(oldOffsets, (i + 1) * 4);
+            int newStart = (int)BitConverter.ToUInt32(newOffsets, i * 4);
+            int newEnd = (int)BitConverter.ToUInt32(newOffsets, (i + 1) * 4);
+            if (oldStart < 0 || oldEnd < oldStart || oldEnd > length ||
+                newStart < 0 || newEnd < newStart || newEnd > length)
+            {
+                continue;
+            }
+
+            int cmpLen = Math.Min(oldEnd - oldStart, newEnd - newStart);
+            int diff = cmpLen > 0
+                ? FindFirstDiff(originalFile, patchedFile, scenarioOffset + oldStart, cmpLen, scenarioOffset + newStart)
+                : -1;
+            if (oldEnd - oldStart != newEnd - newStart || diff >= 0)
+            {
+                changed++;
+                if (firstChanged < 0)
+                {
+                    firstChanged = i;
+                }
+            }
+        }
+
+        Console.WriteLine("  scenario sectors      changed=" + changed + "/" + sectorCount +
+                          (firstChanged >= 0 ? " first=" + firstChanged : ""));
+    }
+
+    private static byte[] ReadScenarioSectorOffsetTable(byte[] file, int scenarioOffset, int tableBytes, BlockTable block)
+    {
+        byte[] table = new byte[tableBytes];
+        Buffer.BlockCopy(file, scenarioOffset, table, 0, table.Length);
+        if ((((uint)block.Flags & (uint)Flags.Encrypted) != 0))
+        {
+            uint fileKey = Encryption.HashString("staredit\\scenario.chk", Encryption.HashType.Hash_FileKey);
+            if ((((uint)block.Flags & (uint)Flags.ModKey) != 0))
+            {
+                fileKey = (fileKey + (uint)block.FileOffset) ^ block.FileSize;
+            }
+
+            DecryptMpqData(table, fileKey - 1);
+        }
+
+        return table;
+    }
+
+    private static void AddKeycalcSegment(List<KeycalcInputSegment> segments, string name, int offset, int length, int fileLength)
+    {
+        if (offset < 0 || length <= 0 || offset + length > fileLength)
+        {
+            return;
+        }
+
+        segments.Add(new KeycalcInputSegment
+        {
+            Name = name,
+            Offset = offset,
+            Length = length
+        });
+    }
+
+    private static bool RangesOverlap(int leftOffset, int leftLength, int rightOffset, int rightLength)
+    {
+        long leftEnd = (long)leftOffset + leftLength;
+        long rightEnd = (long)rightOffset + rightLength;
+        return leftOffset < rightEnd && rightOffset < leftEnd;
+    }
+
+    private static int FindFirstDiff(byte[] left, byte[] right, int offset, int length)
+    {
+        return FindFirstDiff(left, right, offset, length, offset);
+    }
+
+    private static int FindFirstDiff(byte[] left, byte[] right, int leftOffset, int length, int rightOffset)
+    {
+        int max = Math.Min(length, Math.Min(left.Length - leftOffset, right.Length - rightOffset));
+        for (int i = 0; i < max; i++)
+        {
+            if (left[leftOffset + i] != right[rightOffset + i])
+            {
+                return leftOffset + i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static uint Fnv1a32(byte[] data, int offset, int length)
+    {
+        uint hash = 2166136261u;
+        int end = Math.Min(data.Length, offset + length);
+        for (int i = offset; i < end; i++)
+        {
+            hash ^= data[i];
+            hash *= 16777619u;
+        }
+
+        return hash;
     }
 
     private static bool TryReadFreezeKeyFile(string input, Stats stats, out FreezeKeyFile keyFile)
