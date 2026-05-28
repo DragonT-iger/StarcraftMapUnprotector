@@ -44,12 +44,79 @@ internal static partial class StarcraftMapUnprotector
 
     private static byte[] BuildStaticLv2Chk(string input, byte[] inputBytes, byte[] chk, Stats stats)
     {
-        RunLv2Diagnostics(input, inputBytes, chk, stats);
+        byte[] trigData;
+        if (!TryGetFirstChkSection(chk, "TRIG", out trigData))
+        {
+            throw new InvalidDataException("Lv2: TRIG section not found in CHK.");
+        }
 
-        throw new NotSupportedException(
-            "Lv2 static restore is stopped before writing output: FreezeOffsetDecryptor still needs " +
-            "oJumperArray/nextptr extraction. The old in-place Lv2 writer is intentionally disabled " +
-            "because it produced maps that ScmDraft could not open or whose triggers did not run.");
+        if (trigData.Length % FreezeTrigSize != 0)
+        {
+            throw new InvalidDataException("Lv2: TRIG section size is not a multiple of " + FreezeTrigSize + ".");
+        }
+
+        int totalTriggers = trigData.Length / FreezeTrigSize;
+        int encryptedOffset;
+        int encryptedCount = CountEncryptedFreezeTriggers(trigData, totalTriggers, out encryptedOffset);
+
+        if (encryptedCount == 0)
+        {
+            Console.WriteLine("  Lv2: no encrypted triggers found. Returning CHK as-is.");
+            return chk;
+        }
+
+        Console.WriteLine("  Lv2: " + encryptedCount + " encrypted triggers in " + totalTriggers + " total.");
+
+        uint recoveredKey;
+        if (!TryRecoverFreezeKeyByFastBruteforce(trigData, totalTriggers, out recoveredKey))
+        {
+            throw new InvalidDataException("Lv2: triggerKey brute-force failed. Cannot proceed.");
+        }
+
+        Console.WriteLine("  Lv2: triggerKey = 0x" + recoveredKey.ToString("X8"));
+
+        int decrypted = DecryptAllFreezeTriggers(trigData, recoveredKey, false);
+        stats.DecryptedFreezeTriggers = decrypted;
+        Console.WriteLine("  Lv2: decrypted " + decrypted + " triggers (flag restored to exec_flags only).");
+        Console.WriteLine("  Lv2: EUD VM triggers preserved (not disabled).");
+
+        return ReplaceTrigSection(chk, trigData);
+    }
+
+    private static byte[] ReplaceTrigSection(byte[] chk, byte[] newTrigData)
+    {
+        using (var ms = new MemoryStream(chk.Length))
+        {
+            int pos = 0;
+            while (pos + 8 <= chk.Length)
+            {
+                string name = System.Text.Encoding.ASCII.GetString(chk, pos, 4);
+                uint size32 = BitConverter.ToUInt32(chk, pos + 4);
+                if (size32 > (uint)(chk.Length - pos - 8))
+                    break;
+                int size = (int)size32;
+
+                if (name == "TRIG")
+                {
+                    ms.Write(chk, pos, 4);
+                    ms.Write(BitConverter.GetBytes(newTrigData.Length), 0, 4);
+                    ms.Write(newTrigData, 0, newTrigData.Length);
+                }
+                else
+                {
+                    ms.Write(chk, pos, 8 + size);
+                }
+
+                pos += 8 + size;
+            }
+
+            if (pos < chk.Length)
+            {
+                ms.Write(chk, pos, chk.Length - pos);
+            }
+
+            return ms.ToArray();
+        }
     }
 
     private static void RunLv2Diagnostics(string input, byte[] inputBytes, byte[] chk, Stats stats)

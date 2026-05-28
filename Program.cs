@@ -359,13 +359,21 @@ internal static partial class StarcraftMapUnprotector
                 return true;
             }
 
+            bool lv2InPlace = Lv2Mode && stats.IsFreezeProtected && !LooksLikeChk(inputBytes);
             byte[] normalized = RawChkMode
                 ? chk
-                : Lv2Mode && stats.IsFreezeProtected && !LooksLikeChk(inputBytes)
+                : lv2InPlace
                     ? BuildStaticLv2Chk(input, inputBytes, chk, stats)
                     : BuildNormalizedChk(sections, stats);
             DumpChkSections(normalized);
-            WriteStandardMpq(output, normalized, extraFiles, BuildFreezeBlob(stats));
+            if (lv2InPlace)
+            {
+                WriteLv2Mpq(input, output, normalized, BuildFreezeBlob(stats));
+            }
+            else
+            {
+                WriteStandardMpq(output, normalized, extraFiles, BuildFreezeBlob(stats));
+            }
             usedDeepRecovery = stats.MpqDeepRecoveryUsed > 0;
 
             Console.WriteLine("Input : " + input);

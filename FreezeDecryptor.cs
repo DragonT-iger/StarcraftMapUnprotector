@@ -430,7 +430,14 @@ internal static partial class StarcraftMapUnprotector
             }
         }
 
-        DisableFreezeEudTriggers(data, stats);
+        if (stats.Lv2Mode)
+        {
+            Console.WriteLine("  Lv2 mode: EUD VM triggers preserved (DisableFreezeEudTriggers skipped).");
+        }
+        else
+        {
+            DisableFreezeEudTriggers(data, stats);
+        }
 
         return decrypted;
     }
