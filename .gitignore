@@ -19,7 +19,7 @@ artifacts/
 *.rar
 
 # Sensitive analysis documents
-Docs/Formats/Freeze05/report.md
+Docs/
 AGENT.md
 
 # Generated dump/analysis outputs
