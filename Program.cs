@@ -29,6 +29,30 @@ internal static partial class StarcraftMapUnprotector
     // When set, print Lv2 static-restore diagnostics without writing an output file.
     private static bool Lv2DiagMode;
 
+    // Experimental Lv2 mode: clear encrypted trigger exec flags after decrypting bodies.
+    private static bool Lv2ClearExecFlags;
+
+    // Experimental Lv2 mode: disable SetDeaths-only Freeze VM/control triggers after decrypting bodies.
+    private static bool Lv2DisableVm;
+
+    // Experimental Lv2 mode: force decrypted encrypted triggers to run for player slots 1-8.
+    private static bool Lv2ForcePlayers;
+
+    // When set, only dump Freeze05-decrypted TRIG records to this text file.
+    private static string DumpDecryptedTriggersPath;
+
+    // When set, dump ALL TRIG records (not just encrypted) to this text file.
+    private static string DumpAllTriggersPath;
+
+    // When set, write a human-facing map analysis report (Markdown) to this file.
+    private static string ReportPath;
+
+    // When set, write a per-address EUD access histogram (CSV) to this file.
+    private static string EudHistogramPath;
+
+    // When set, inject a minimal sound-effect trigger (in-place, size-invariant) and write here.
+    private static string InjectSoundPath;
+
     private static readonly string[] CanonicalOrder =
     {
         "VER ", "TYPE", "IVE2", "VCOD", "IOWN", "OWNR", "SIDE", "COLR",
@@ -90,6 +114,9 @@ internal static partial class StarcraftMapUnprotector
         public bool FreezeBruteforceKey;    // enable file-only triggerKey brute-force
         public bool Lv2Mode;               // output game-playable file via static Freeze restore
         public bool Lv2DiagMode;           // print static Freeze restore diagnostics only
+        public bool Lv2ClearExecFlags;     // clear decrypted Freeze trigger exec flags to force execution
+        public bool Lv2DisableVm;          // disable Freeze VM/control triggers after decrypting bodies
+        public bool Lv2ForcePlayers;       // force decrypted Freeze triggers to execute for players 1-8
     }
 
     private sealed class MpqFileEntry
@@ -170,6 +197,42 @@ internal static partial class StarcraftMapUnprotector
                 Lv2DiagMode = true;
                 FreezeBruteforceKey = true;
             }
+            else if (args[i] == "--lv2-clear-flags")
+            {
+                Lv2ClearExecFlags = true;
+            }
+            else if (args[i] == "--lv2-disable-vm")
+            {
+                Lv2DisableVm = true;
+            }
+            else if (args[i] == "--lv2-force-players")
+            {
+                Lv2ForcePlayers = true;
+            }
+            else if (args[i] == "--dump-decrypted-triggers" && i + 1 < args.Length)
+            {
+                DumpDecryptedTriggersPath = Path.GetFullPath(args[++i]);
+                FreezeBruteforceKey = true;
+            }
+            else if (args[i] == "--dump-all-triggers" && i + 1 < args.Length)
+            {
+                DumpAllTriggersPath = Path.GetFullPath(args[++i]);
+                FreezeBruteforceKey = true;
+            }
+            else if (args[i] == "--report" && i + 1 < args.Length)
+            {
+                ReportPath = Path.GetFullPath(args[++i]);
+                FreezeBruteforceKey = true;
+            }
+            else if (args[i] == "--eud-histogram" && i + 1 < args.Length)
+            {
+                EudHistogramPath = Path.GetFullPath(args[++i]);
+                FreezeBruteforceKey = true;
+            }
+            else if (args[i] == "--inject-sound" && i + 1 < args.Length)
+            {
+                InjectSoundPath = Path.GetFullPath(args[++i]);
+            }
             else
             {
                 argList.Add(args[i]);
@@ -217,6 +280,14 @@ internal static partial class StarcraftMapUnprotector
             Console.WriteLine("                        Brute-force the final Freeze triggerKey from encrypted TRIG data.");
             Console.WriteLine("  --lv2                 Output a game-playable (Lv2) file using static Freeze05 restore.");
             Console.WriteLine("  --lv2-diag            Print static Freeze05 restore diagnostics without writing output.");
+            Console.WriteLine("  --lv2-clear-flags     Experimental: clear decrypted Freeze trigger exec flags to 0.");
+            Console.WriteLine("  --lv2-disable-vm      Experimental: disable SetDeaths-only Freeze VM/control triggers.");
+            Console.WriteLine("  --lv2-force-players   Experimental: set decrypted Freeze trigger player slots 1-8.");
+            Console.WriteLine("  --dump-decrypted-triggers <txt>");
+            Console.WriteLine("                        Dump only Freeze05-decrypted TRIG records as text.");
+            Console.WriteLine("  --report <md>         Write a human-facing map analysis report (Markdown).");
+            Console.WriteLine("  --eud-histogram <csv> Dump per-address EUD access counts (analysis; aggregate across maps).");
+            Console.WriteLine("  --inject-sound <out>  Inject a minimal PlayWAV trigger in-place (size-invariant) and exit.");
             return 0;
         }
 
@@ -231,6 +302,31 @@ internal static partial class StarcraftMapUnprotector
         {
             Console.Error.WriteLine("Input file not found: " + input);
             return 2;
+        }
+
+        if (!string.IsNullOrEmpty(DumpDecryptedTriggersPath))
+        {
+            return DumpDecryptedFreezeTriggers(input, DumpDecryptedTriggersPath) ? 0 : 3;
+        }
+
+        if (!string.IsNullOrEmpty(DumpAllTriggersPath))
+        {
+            return DumpAllTriggers(input, DumpAllTriggersPath) ? 0 : 3;
+        }
+
+        if (!string.IsNullOrEmpty(ReportPath))
+        {
+            return GenerateMapReport(input, ReportPath) ? 0 : 3;
+        }
+
+        if (!string.IsNullOrEmpty(EudHistogramPath))
+        {
+            return DumpEudHistogram(input, EudHistogramPath) ? 0 : 3;
+        }
+
+        if (!string.IsNullOrEmpty(InjectSoundPath))
+        {
+            return InjectSound(input, InjectSoundPath) ? 0 : 3;
         }
 
         bool usedDeepRecovery;
@@ -321,7 +417,10 @@ internal static partial class StarcraftMapUnprotector
                 FreezeApplyDumpPath = ApplyDumpPath,
                 FreezeBruteforceKey = FreezeBruteforceKey,
                 Lv2Mode = Lv2Mode,
-                Lv2DiagMode = Lv2DiagMode
+                Lv2DiagMode = Lv2DiagMode,
+                Lv2ClearExecFlags = Lv2ClearExecFlags,
+                Lv2DisableVm = Lv2DisableVm,
+                Lv2ForcePlayers = Lv2ForcePlayers
             };
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);

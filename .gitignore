@@ -18,6 +18,10 @@ artifacts/
 *.7z
 *.rar
 
+# Sensitive analysis documents
+Docs/Formats/Freeze05/report.md
+AGENT.md
+
 # Generated dump/analysis outputs
 *.freeze_dump.csv
 *.triggers.txt
