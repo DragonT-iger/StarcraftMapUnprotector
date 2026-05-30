@@ -8,6 +8,8 @@ internal static partial class StarcraftMapUnprotector
 {
     private const uint FreezeOffsetCryptStep = 0x46B7A62C;
     private const uint DeathTableBase = 0x0058A364;
+    private const uint CurrentPlayerAddress = 0x006509B0;
+    private const uint CurrentPlayerEpd = (CurrentPlayerAddress - DeathTableBase) / 4;
 
     private sealed class FreezeKeyFile
     {
@@ -40,6 +42,17 @@ internal static partial class StarcraftMapUnprotector
         public byte Modifier;
         public uint Epd;
         public uint Address;
+    }
+
+    private sealed class ResolvedEudWrite
+    {
+        public int TriggerIndex;
+        public int ActionIndex;
+        public uint TargetEpd;
+        public uint TargetAddress;
+        public uint Value;
+        public byte Modifier;
+        public bool ViaCurrentPlayer;
     }
 
     private sealed class KeycalcInputSegment
@@ -92,10 +105,25 @@ internal static partial class StarcraftMapUnprotector
 
         Console.WriteLine("  Lv2: triggerKey = 0x" + recoveredKey.ToString("X8"));
 
-        int decrypted = DecryptAllFreezeTriggers(trigData, recoveredKey, false);
+        int decrypted = DecryptAllFreezeTriggers(trigData, recoveredKey, false, stats.Lv2ClearExecFlags, stats.Lv2ForcePlayers);
         stats.DecryptedFreezeTriggers = decrypted;
-        Console.WriteLine("  Lv2: decrypted " + decrypted + " triggers (flag restored to exec_flags only).");
-        Console.WriteLine("  Lv2: EUD VM triggers preserved (not disabled).");
+        Console.WriteLine("  Lv2: decrypted " + decrypted + " triggers (" +
+                          (stats.Lv2ClearExecFlags ? "exec flags cleared to 0" : "flag restored to exec_flags only") +
+                          ").");
+        if (stats.Lv2ForcePlayers)
+        {
+            Console.WriteLine("  Lv2: forced decrypted Freeze trigger player slots P1-P8.");
+        }
+        if (stats.Lv2DisableVm)
+        {
+            int disabled = DisableFreezeControlTriggers(trigData);
+            stats.RemovedFreezeEudTriggers += disabled;
+            Console.WriteLine("  Lv2: disabled " + disabled + " SetDeaths-only Freeze VM/control triggers.");
+        }
+        else
+        {
+            Console.WriteLine("  Lv2: EUD VM triggers preserved (not disabled).");
+        }
 
         return ReplaceTrigSection(chk, trigData);
     }
@@ -185,11 +213,16 @@ internal static partial class StarcraftMapUnprotector
                     uint cryptKeyVal = ComputeCryptKeyVal(seedForCrypt);
                     uint triggerKeyVal = FreezeUnmix2(recoveredKey, cryptKeyVal);
                     Console.WriteLine("cryptKeyVal(seed)    : 0x" + cryptKeyVal.ToString("X8"));
-                    Console.WriteLine("triggerKeyVal        : 0x" + triggerKeyVal.ToString("X8") +
-                        " (derived by unmix2(recovered, cryptKeyVal))");
+                Console.WriteLine("triggerKeyVal        : 0x" + triggerKeyVal.ToString("X8") +
+                                      " (derived by unmix2(recovered, cryptKeyVal))");
                 }
 
-                PrintLv2KeycalcInputDiff(inputBytes, chk, trigData, recoveredKey);
+                PrintDecryptedTriggerExecutionSummary(trigData, recoveredKey, stats.Lv2ClearExecFlags, stats.Lv2ForcePlayers);
+                PrintLv2KeycalcInputDiff(inputBytes, chk, trigData, recoveredKey, stats.Lv2ClearExecFlags, stats.Lv2ForcePlayers);
+
+                byte[] lv2Trig = (byte[])trigData.Clone();
+                DecryptAllFreezeTriggers(lv2Trig, recoveredKey, false, stats.Lv2ClearExecFlags, stats.Lv2ForcePlayers);
+                PrintResolvedEudWriteSummary(lv2Trig);
             }
             else
             {
@@ -205,7 +238,161 @@ internal static partial class StarcraftMapUnprotector
                           FreezeOffsetCryptStep.ToString("X8") + " per oJumper entry");
     }
 
-    private static void PrintLv2KeycalcInputDiff(byte[] inputBytes, byte[] chk, byte[] trigData, uint recoveredKey)
+    private static void PrintDecryptedTriggerExecutionSummary(byte[] trigData, uint recoveredKey, bool clearExecFlags, bool forcePlayerSlots)
+    {
+        if (trigData == null || trigData.Length % FreezeTrigSize != 0)
+        {
+            return;
+        }
+
+        int totalTriggers = trigData.Length / FreezeTrigSize;
+        int encrypted = 0;
+        int[] playerCounts = new int[28];
+        var flagCounts = new Dictionary<uint, int>();
+        var firstLines = new List<string>();
+
+        for (int t = 0; t < totalTriggers; t++)
+        {
+            int offset = t * FreezeTrigSize;
+            uint oldFlag = BitConverter.ToUInt32(trigData, offset + 2368);
+            if (oldFlag < 0x80000000u)
+            {
+                continue;
+            }
+
+            byte[] decrypted = new byte[FreezeTrigSize];
+            TryDecryptFreezeTrigger(trigData, offset, recoveredKey, decrypted);
+            uint restoredFlag = clearExecFlags ? 0u : (oldFlag - 0x80000000u) & 0x0Fu;
+            AddCount(flagCounts, restoredFlag);
+            if (forcePlayerSlots)
+            {
+                for (int p = 0; p < 8; p++)
+                {
+                    decrypted[2372 + p] = 1;
+                }
+            }
+
+            for (int p = 0; p < playerCounts.Length; p++)
+            {
+                if (decrypted[2372 + p] != 0)
+                {
+                    playerCounts[p]++;
+                }
+            }
+
+            if (firstLines.Count < 12)
+            {
+                firstLines.Add(
+                    "  T" + t +
+                    " oldFlag=0x" + oldFlag.ToString("X8") +
+                    " restored=0x" + restoredFlag.ToString("X2") +
+                    " players=" + FormatPlayerBytes(decrypted, 2372, 8) +
+                    " cond=" + CountUsedConditions(decrypted) +
+                    " act=" + CountUsedActions(decrypted) +
+                    " actionTypes=" + FormatActionTypes(decrypted, 8));
+            }
+
+            encrypted++;
+        }
+
+        Console.WriteLine("decrypted trigger exec : encrypted=" + encrypted +
+                          " flagCounts=" + FormatUIntCounts(flagCounts));
+        Console.WriteLine("decrypted trigger players: " + FormatPlayerCounts(playerCounts));
+        foreach (string line in firstLines)
+        {
+            Console.WriteLine(line);
+        }
+    }
+
+    private static void AddCount(Dictionary<uint, int> counts, uint value)
+    {
+        int current;
+        counts.TryGetValue(value, out current);
+        counts[value] = current + 1;
+    }
+
+    private static string FormatPlayerCounts(int[] counts)
+    {
+        var parts = new List<string>();
+        for (int i = 0; i < counts.Length; i++)
+        {
+            if (counts[i] != 0)
+            {
+                parts.Add("P" + i + "=" + counts[i]);
+            }
+        }
+
+        return parts.Count == 0 ? "(none)" : string.Join(", ", parts.ToArray());
+    }
+
+    private static string FormatUIntCounts(Dictionary<uint, int> counts)
+    {
+        if (counts == null || counts.Count == 0)
+        {
+            return "(none)";
+        }
+
+        return string.Join(", ",
+            counts.OrderBy(kv => kv.Key)
+                .Select(kv => "0x" + kv.Key.ToString("X2") + "=" + kv.Value)
+                .ToArray());
+    }
+
+    private static string FormatPlayerBytes(byte[] trigger, int offset, int count)
+    {
+        var parts = new string[count];
+        for (int i = 0; i < count; i++)
+        {
+            parts[i] = trigger[offset + i].ToString("X2");
+        }
+
+        return string.Join(" ", parts);
+    }
+
+    private static int CountUsedConditions(byte[] trigger)
+    {
+        int count = 0;
+        for (int c = 0; c < 16; c++)
+        {
+            if (trigger[c * 20 + 15] != 0)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static int CountUsedActions(byte[] trigger)
+    {
+        int count = 0;
+        for (int a = 0; a < 64; a++)
+        {
+            if (trigger[320 + a * 32 + 26] != 0)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static string FormatActionTypes(byte[] trigger, int maxTypes)
+    {
+        var parts = new List<string>();
+        for (int a = 0; a < 64 && parts.Count < maxTypes; a++)
+        {
+            byte type = trigger[320 + a * 32 + 26];
+            if (type != 0)
+            {
+                parts.Add(type.ToString());
+            }
+        }
+
+        return parts.Count == 0 ? "(none)" : string.Join(",", parts.ToArray());
+    }
+
+    private static void PrintLv2KeycalcInputDiff(byte[] inputBytes, byte[] chk, byte[] trigData, uint recoveredKey, bool clearExecFlags, bool forcePlayerSlots)
     {
         if (LooksLikeChk(inputBytes))
         {
@@ -216,7 +403,7 @@ internal static partial class StarcraftMapUnprotector
         try
         {
             byte[] lv2Trig = (byte[])trigData.Clone();
-            DecryptAllFreezeTriggers(lv2Trig, recoveredKey, false);
+            DecryptAllFreezeTriggers(lv2Trig, recoveredKey, false, clearExecFlags, forcePlayerSlots);
             byte[] lv2Chk = ReplaceTrigSection(chk, lv2Trig);
             Lv2MpqPatchResult patch = BuildLv2MpqPatch(inputBytes, lv2Chk);
 
@@ -466,6 +653,196 @@ internal static partial class StarcraftMapUnprotector
 
         value = BitConverter.ToUInt32(data, offset);
         return true;
+    }
+
+    private static void PrintResolvedEudWriteSummary(byte[] trigData)
+    {
+        List<ResolvedEudWrite> writes = ResolveEudWritesWithCurrentPlayer(trigData);
+        Console.WriteLine("resolved EUD writes   : " + writes.Count + " SetDeaths writes after CP propagation");
+        if (writes.Count == 0)
+        {
+            return;
+        }
+
+        var targetCounts = writes
+            .GroupBy(w => w.TargetAddress)
+            .Select(g => new { Address = g.Key, Count = g.Count(), First = g.First() })
+            .OrderByDescending(g => g.Count)
+            .ThenBy(g => g.Address)
+            .Take(16)
+            .ToList();
+
+        Console.WriteLine("resolved write targets:");
+        foreach (var target in targetCounts)
+        {
+            Console.WriteLine("  0x" + target.Address.ToString("X8") +
+                              " epd=" + target.First.TargetEpd +
+                              " count=" + target.Count +
+                              " first=T" + target.First.TriggerIndex + "/A" + target.First.ActionIndex +
+                              (target.First.ViaCurrentPlayer ? " viaCP" : ""));
+        }
+
+        var highTargets = writes
+            .Where(w => w.TargetAddress >= 0x00500000u && w.TargetAddress <= 0x00700000u)
+            .Select(w => w.TargetAddress)
+            .Distinct()
+            .OrderBy(v => v)
+            .ToList();
+        if (highTargets.Count == 0)
+        {
+            return;
+        }
+
+        Console.WriteLine("trigger-memory-like targets: " + highTargets.Count +
+                          " range=0x" + highTargets.First().ToString("X8") +
+                          "-0x" + highTargets.Last().ToString("X8"));
+        PrintStrideCandidates(highTargets);
+    }
+
+    private static List<ResolvedEudWrite> ResolveEudWritesWithCurrentPlayer(byte[] trigData)
+    {
+        var writes = new List<ResolvedEudWrite>();
+        if (trigData == null || trigData.Length % FreezeTrigSize != 0)
+        {
+            return writes;
+        }
+
+        uint currentPlayer = 0;
+        int totalTriggers = trigData.Length / FreezeTrigSize;
+        for (int t = 0; t < totalTriggers; t++)
+        {
+            int triggerOffset = t * FreezeTrigSize;
+            for (int a = 0; a < 64; a++)
+            {
+                int actionOffset = triggerOffset + 320 + a * 32;
+                byte actionType = trigData[actionOffset + 26];
+                if (actionType != 45)
+                {
+                    continue;
+                }
+
+                uint player = BitConverter.ToUInt32(trigData, actionOffset + 16);
+                uint value = BitConverter.ToUInt32(trigData, actionOffset + 20);
+                ushort unit = BitConverter.ToUInt16(trigData, actionOffset + 24);
+                byte modifier = trigData[actionOffset + 27];
+
+                bool viaCurrentPlayer = player == 13;
+                uint targetEpd = viaCurrentPlayer
+                    ? unchecked(currentPlayer + (uint)unit * 12u)
+                    : unchecked(player + (uint)unit * 12u);
+                uint targetAddress = unchecked(DeathTableBase + targetEpd * 4u);
+
+                if (targetEpd == CurrentPlayerEpd)
+                {
+                    if (modifier == 7)
+                    {
+                        currentPlayer = value;
+                    }
+                    else if (modifier == 8)
+                    {
+                        currentPlayer = unchecked(currentPlayer + value);
+                    }
+                    else if (modifier == 9)
+                    {
+                        currentPlayer = unchecked(currentPlayer - value);
+                    }
+                }
+
+                if (targetEpd > 27 || viaCurrentPlayer)
+                {
+                    writes.Add(new ResolvedEudWrite
+                    {
+                        TriggerIndex = t,
+                        ActionIndex = a,
+                        TargetEpd = targetEpd,
+                        TargetAddress = targetAddress,
+                        Value = value,
+                        Modifier = modifier,
+                        ViaCurrentPlayer = viaCurrentPlayer
+                    });
+                }
+            }
+        }
+
+        return writes;
+    }
+
+    private static int DisableFreezeControlTriggers(byte[] trigData)
+    {
+        if (trigData == null || trigData.Length % FreezeTrigSize != 0)
+        {
+            return 0;
+        }
+
+        int disabled = 0;
+        int totalTriggers = trigData.Length / FreezeTrigSize;
+        for (int t = 0; t < totalTriggers; t++)
+        {
+            int offset = t * FreezeTrigSize;
+            if (!IsSetDeathsOnlyTrigger(trigData, offset))
+            {
+                continue;
+            }
+
+            for (int i = 0; i < 28; i++)
+            {
+                trigData[offset + 2372 + i] = 0;
+            }
+
+            trigData[offset + 2368] = 0;
+            trigData[offset + 2369] = 0;
+            trigData[offset + 2370] = 0;
+            trigData[offset + 2371] = 0;
+            disabled++;
+        }
+
+        return disabled;
+    }
+
+    private static bool IsSetDeathsOnlyTrigger(byte[] data, int offset)
+    {
+        bool hasAction = false;
+        for (int i = 0; i < 64; i++)
+        {
+            int actionOffset = offset + 320 + i * 32;
+            byte actionType = data[actionOffset + 26];
+            if (actionType == 0)
+                continue;
+
+            if (actionType != 45)
+                return false;
+
+            hasAction = true;
+        }
+
+        return hasAction;
+    }
+
+    private static void PrintStrideCandidates(List<uint> addresses)
+    {
+        if (addresses.Count < 4)
+        {
+            return;
+        }
+
+        var best = new List<string>();
+        for (int stride = 4; stride <= 4096; stride += 4)
+        {
+            int distinctMods = addresses.Select(addr => (int)(addr % (uint)stride)).Distinct().Count();
+            if (distinctMods <= 4)
+            {
+                best.Add(stride + ":" + distinctMods);
+                if (best.Count >= 8)
+                {
+                    break;
+                }
+            }
+        }
+
+        if (best.Count > 0)
+        {
+            Console.WriteLine("stride candidates      : " + string.Join(", ", best.ToArray()));
+        }
     }
 
     private static bool IsPlausibleRawSpan(int offset, int length, int fileLength, int headerBase)

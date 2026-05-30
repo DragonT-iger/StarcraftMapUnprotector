@@ -134,6 +134,16 @@ internal static partial class StarcraftMapUnprotector
 
     private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveLv2FlagPayload)
     {
+        return DecryptAllFreezeTriggers(trigData, key, preserveLv2FlagPayload, false);
+    }
+
+    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveLv2FlagPayload, bool clearExecFlags)
+    {
+        return DecryptAllFreezeTriggers(trigData, key, preserveLv2FlagPayload, clearExecFlags, false);
+    }
+
+    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveLv2FlagPayload, bool clearExecFlags, bool forcePlayerSlots)
+    {
         int totalTriggers = trigData.Length / FreezeTrigSize;
         int decrypted = 0;
 
@@ -148,13 +158,22 @@ internal static partial class StarcraftMapUnprotector
             TryDecryptFreezeTrigger(trigData, offset, key, buf);
             Buffer.BlockCopy(buf, 0, trigData, offset, FreezeTrigSize);
 
-            uint restoredFlag = preserveLv2FlagPayload
+            uint restoredFlag = clearExecFlags
+                ? 0u
+                : preserveLv2FlagPayload
                 ? flag - 0x80000000u
                 : (flag - 0x80000000u) & 0x0F;
             trigData[offset + 2368] = (byte)restoredFlag;
             trigData[offset + 2369] = (byte)(restoredFlag >> 8);
             trigData[offset + 2370] = (byte)(restoredFlag >> 16);
             trigData[offset + 2371] = (byte)(restoredFlag >> 24);
+            if (forcePlayerSlots)
+            {
+                for (int p = 0; p < 8; p++)
+                {
+                    trigData[offset + 2372 + p] = 1;
+                }
+            }
 
             decrypted++;
         }

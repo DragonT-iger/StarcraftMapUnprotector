@@ -938,19 +938,33 @@ internal static partial class StarcraftMapUnprotector
 
         bool compress = (((uint)block.Flags & (uint)Flags.Compressed) != 0) ||
                         (((uint)block.Flags & (uint)Flags.Imploded) != 0);
-        byte[] packed = BuildMpqFileBlock(newChk, sectorSize, compress, encrypted, fileKey);
-
-        if (packed.Length > block.CompSize)
-        {
-            throw new InvalidDataException(
-                "Lv2 MPQ patch needs " + packed.Length +
-                " bytes, but the original scenario.chk block has only " +
-                block.CompSize + " bytes. Refusing to move MPQ data because Freeze05 keycalc is structure-sensitive.");
-        }
 
         int blockOffset = tables.Header.BaseOffset + block.FileOffset;
+        byte[] originalRaw = new byte[(int)block.CompSize];
+        Buffer.BlockCopy(file, blockOffset, originalRaw, 0, originalRaw.Length);
+
+        byte[] packed;
+        if (compress)
+        {
+            packed = BuildLv2MpqFileBlockPreservingSectors(originalRaw, newChk, sectorSize, encrypted, fileKey);
+        }
+        else
+        {
+            packed = BuildMpqFileBlock(newChk, sectorSize, false, encrypted, fileKey);
+            if (packed.Length > block.CompSize)
+            {
+                throw new InvalidDataException(
+                    "Lv2 MPQ patch needs " + packed.Length +
+                    " bytes, but the original scenario.chk block has only " +
+                    block.CompSize + " bytes. Refusing to move MPQ data.");
+            }
+        }
+
         Buffer.BlockCopy(packed, 0, file, blockOffset, packed.Length);
-        Array.Clear(file, blockOffset + packed.Length, (int)block.CompSize - packed.Length);
+        if (packed.Length < (int)block.CompSize)
+        {
+            Array.Clear(file, blockOffset + packed.Length, (int)block.CompSize - packed.Length);
+        }
 
         return new Lv2MpqPatchResult
         {
@@ -1265,6 +1279,91 @@ internal static partial class StarcraftMapUnprotector
         byte[] trimmed = new byte[expectedSize];
         Buffer.BlockCopy(data, 0, trimmed, 0, trimmed.Length);
         return trimmed;
+    }
+
+    private static byte[] BuildLv2MpqFileBlockPreservingSectors(
+        byte[] originalRaw,
+        byte[] newData,
+        int sectorSize,
+        bool encrypted,
+        uint fileKey)
+    {
+        int fileSize = newData.Length;
+        int sectorCount = Math.Max(1, (fileSize + sectorSize - 1) / sectorSize);
+        int tableBytes = (sectorCount + 1) * 4;
+
+        if (originalRaw.Length < tableBytes)
+        {
+            throw new InvalidDataException(
+                "Lv2 sector-preserving patch: original block too small to hold sector offset table.");
+        }
+
+        byte[] tableDecrypted = new byte[tableBytes];
+        Buffer.BlockCopy(originalRaw, 0, tableDecrypted, 0, tableBytes);
+        if (encrypted)
+        {
+            DecryptMpqData(tableDecrypted, fileKey - 1);
+        }
+
+        int[] offsets = new int[sectorCount + 1];
+        for (int i = 0; i <= sectorCount; i++)
+        {
+            uint raw = BitConverter.ToUInt32(tableDecrypted, i * 4);
+            if (raw > (uint)originalRaw.Length)
+            {
+                throw new InvalidDataException(
+                    "Lv2 sector-preserving patch: sector offset [" + i + "] = " + raw + " exceeds block size " + originalRaw.Length + ".");
+            }
+
+            offsets[i] = (int)raw;
+        }
+
+        byte[] result = (byte[])originalRaw.Clone();
+
+        for (int i = 0; i < sectorCount; i++)
+        {
+            int origSectorOffset = offsets[i];
+            int origSectorSize = offsets[i + 1] - origSectorOffset;
+            if (origSectorSize <= 0)
+            {
+                throw new InvalidDataException("Lv2 sector-preserving patch: sector " + i + " has non-positive size " + origSectorSize + ".");
+            }
+
+            int dataOffset = i * sectorSize;
+            int dataLength = Math.Min(sectorSize, newData.Length - dataOffset);
+            byte[] decompressed = new byte[dataLength];
+            Buffer.BlockCopy(newData, dataOffset, decompressed, 0, dataLength);
+
+            byte[] recompressed = CompressMpqSector(decompressed);
+            if (recompressed.Length > origSectorSize)
+            {
+                if (dataLength <= origSectorSize)
+                {
+                    recompressed = decompressed;
+                }
+                else
+                {
+                    throw new InvalidDataException(
+                        "Lv2 sector-preserving patch: sector " + i + " recompressed to " + recompressed.Length +
+                        " bytes but original slot is only " + origSectorSize + " bytes.");
+                }
+            }
+
+            if (encrypted)
+            {
+                byte[] enc = (byte[])recompressed.Clone();
+                EncryptMpqData(enc, fileKey + (uint)i);
+                recompressed = enc;
+            }
+
+            Buffer.BlockCopy(recompressed, 0, result, origSectorOffset, recompressed.Length);
+            if (recompressed.Length < origSectorSize)
+            {
+                Array.Clear(result, origSectorOffset + recompressed.Length, origSectorSize - recompressed.Length);
+            }
+        }
+
+        return result;
     }
 
     private static byte[] BuildMpqFileBlock(byte[] data, int sectorSize, bool compress, bool encrypted, uint key)
