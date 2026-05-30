@@ -18,6 +18,12 @@ artifacts/
 *.7z
 *.rar
 
+# Generated dump/analysis outputs
+*.freeze_dump.csv
+*.triggers.txt
+# Files accidentally created from a CLI flag name (e.g. --dump-decrypted-triggers)
+--*
+
 # Logs and local editor/OS files
 *.log
 Desktop.ini
