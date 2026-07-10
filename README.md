@@ -15,8 +15,21 @@ Freeze로 보호된 EUD 맵은 `--lv2` 전용 경로에서 트리거 복호화�
 
 Windows용 실행 파일은 GitHub Releases에서 받을 수 있습니다.
 
-- [v1.2.0 다운로드](https://github.com/DragonT-iger/StarcraftMapUnprotector/releases/tag/v1.2.0)
-- 다운로드 파일: `StarcraftMapUnprotector-v1.2.0-win.zip`
+- [v2.0.0 다운로드](https://github.com/DragonT-iger/StarcraftMapUnprotector/releases/tag/v2.0.0)
+- 다운로드 파일: `StarcraftMapUnprotector-v2.0.0-win.zip`
+
+## v2.0.0 주요 변경 사항
+
+v2.0.0에서는 Freeze05로 보호된 EUD 맵을 위한 정적 복원 경로를 추가했습니다.
+
+- Freeze VM을 한 프레임 에뮬레이션해 실제 트리거 키 복구
+- 암호화된 `TRIG` 레코드 복호화
+- 정적 및 런타임 복원형 STRx obf-jump 탐지와 무력화
+- 복원된 `scenario.chk`를 원본 MPQ 블록에 같은 크기로 in-place 기록
+- scenario 블록 밖의 MPQ 바이트 불변성과 결과 CHK 재추출 일치 검증
+- 파일을 쓰지 않고 복원 가능성을 검사하는 `--lv2-diag` 모드
+
+일반 변환은 ScmDraft 2 편집 호환성을 우선합니다. Freeze 맵의 `--lv2` 출력은 게임 실행 구조를 보존하기 위한 별도 경로이며 ScmDraft 2 편집용으로 지원하지 않습니다. 또한 Freeze 적용 전의 eudplib 소스, 변수명, 주석은 복원하지 않습니다.
 
 ## 사용 방법
 
@@ -100,6 +113,6 @@ GitHub Issues 외에도 아래 연락처로 개선사항을 보내주셔도 됩�
 직접 빌드할 때는 `TkMPQLib.dll`이 32비트 전용이라는 점에 주의해 주세요. 실행 파일도 x86으로 빌드해야 합니다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Build-Release.ps1 -Version 1.2.0
+powershell -ExecutionPolicy Bypass -File .\Build-Release.ps1 -Version 2.0.0
 .\artifacts\package\StarcraftMapUnprotector\StarcraftMapUnprotector.exe --help --no-pause
 ```
