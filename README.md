@@ -3,7 +3,7 @@
 StarCraft 맵 파일의 보호 구조를 정리하고, 가능한 경우 `scenario.chk`를 복구해 ScmDraft 2에서 다시 열 수 있는 형태의 MPQ 맵 파일로 저장하는 도구입니다.
 
 이 도구는 ScmDraft 2 기준으로 맵을 열고 편집할 수 있게 만드는 것을 목표로 합니다. 일반 변환 결과의 StarCraft 실행은 보장하지 않습니다.
-Freeze로 보호된 EUD 맵은 `--lv2` 전용 경로에서 트리거 복호화와 MPQ 구조 보존을 시도합니다.
+Freeze로 보호된 EUD 맵은 별도 옵션 없이 자동 감지하여 트리거 복호화와 MPQ 구조 보존을 시도합니다. 출력 경로를 생략하면 파일 이름 뒤에 `.unfreezed`를 붙입니다.
 
 ## 오픈소스 공개 목적
 
@@ -23,13 +23,16 @@ Windows용 실행 파일은 GitHub Releases에서 받을 수 있습니다.
 v2.0.0에서는 Freeze05로 보호된 EUD 맵을 위한 정적 복원 경로를 추가했습니다.
 
 - Freeze VM을 한 프레임 에뮬레이션해 실제 트리거 키 복구
+- Freeze 보호 자동 감지 및 `.unfreezed.scx`/`.unfreezed.scm` 출력 이름 적용
+- 구형 `STR ` 및 확장 `STRx`에 저장된 Freeze 런타임 payload 실행 지원
+- 안정적인 self-mod 체인뿐 아니라 한 번만 기록된 transient 키 후보 검증
 - 암호화된 `TRIG` 레코드 복호화
 - 정적 및 런타임 복원형 STRx obf-jump 탐지와 무력화
 - 복원된 `scenario.chk`를 원본 MPQ 블록에 같은 크기로 in-place 기록
 - scenario 블록 밖의 MPQ 바이트 불변성과 결과 CHK 재추출 일치 검증
-- 파일을 쓰지 않고 복원 가능성을 검사하는 `--lv2-diag` 모드
+- 파일을 쓰지 않고 복원 가능성을 검사하는 `--diag` 모드
 
-일반 변환은 ScmDraft 2 편집 호환성을 우선합니다. Freeze 맵의 `--lv2` 출력은 게임 실행 구조를 보존하기 위한 별도 경로이며 ScmDraft 2 편집용으로 지원하지 않습니다. 또한 Freeze 적용 전의 eudplib 소스, 변수명, 주석은 복원하지 않습니다.
+일반 변환은 ScmDraft 2 편집 호환성을 우선합니다. 자동 감지된 Freeze 맵의 출력은 게임 실행 구조를 보존하기 위한 별도 경로이며 ScmDraft 2 편집용으로 지원하지 않습니다. 또한 Freeze 적용 전의 eudplib 소스, 변수명, 주석은 복원하지 않습니다.
 
 ## 사용 방법
 
@@ -38,6 +41,8 @@ v2.0.0에서는 Freeze05로 보호된 EUD 맵을 위한 정적 복원 경로를 
    - 지원 파일: `.scx`, `.scm`
 3. `StarcraftMapUnprotector.exe`를 실행합니다.
 4. 변환된 파일은 `Maps\Outputs` 폴더에 생성됩니다.
+   - Freeze 맵: `원본이름.unfreezed.scx`
+   - 일반 맵: `원본이름.unprotected.scx`
 
 원본 파일은 덮어쓰지 않습니다. 중요한 맵은 그래도 별도로 백업해 둔 뒤 사용하는 것을 권장합니다.
 
@@ -50,24 +55,26 @@ v2.0.0에서는 Freeze05로 보호된 EUD 맵을 위한 정적 복원 경로를 
 ```powershell
 StarcraftMapUnprotector.exe input.scx output.scx
 StarcraftMapUnprotector.exe input.scx output.scx --no-pause
-StarcraftMapUnprotector.exe input.scx output.scx --raw-chk --no-pause
+StarcraftMapUnprotector.exe freeze-protected.scx --no-pause
 ```
 
 | 옵션 | 설명 |
 |------|------|
 | `--no-pause` | 작업 완료 후 Enter 입력 없이 바로 종료 |
-| `--raw-chk` | CHK 정규화 없이 추출된 그대로 재패키징 |
-| `--lv2` | Freeze 감지, VM 기반 키 복구, 트리거 복호화, obf-jump 처리 후 원본 MPQ 블록에 in-place 기록 |
-| `--lv2-diag` | 같은 Freeze 파이프라인과 MPQ readback 검증을 실행하지만 출력 파일은 쓰지 않음 |
+| `--freeze` | 자동 감지가 어려운 변형에서 Freeze 복원 경로를 강제로 사용 |
+| `--diag` | 같은 Freeze 파이프라인과 MPQ readback 검증을 실행하지만 출력 파일은 쓰지 않음 |
+| `--freeze-bruteforce-key` | 자동 키 복구가 실패했을 때 사용할 2^32 키 검색 폴백을 명시적으로 활성화 |
 
-## Freeze/EUD `--lv2` 모드
+## Freeze/EUD 자동 복원
 
 ```powershell
-StarcraftMapUnprotector.exe protected.scx output.scx --lv2 --no-pause
-StarcraftMapUnprotector.exe protected.scx --lv2-diag --no-pause
+StarcraftMapUnprotector.exe protected.scx --no-pause
+StarcraftMapUnprotector.exe protected.scx output.scx --no-pause
+StarcraftMapUnprotector.exe protected.scx --diag --no-pause
+StarcraftMapUnprotector.exe protected.scx --freeze-bruteforce-key --no-pause
 ```
 
-`--lv2`는 Freeze 런타임을 한 프레임 에뮬레이션해 `actualKey`를 복구하고, 실패하면 VM 메모리 스캔과 기존 2^32 검색을 차례로 사용합니다. STRx의 obf-jump는 정적 배열을 먼저 찾고, 보호기가 배열까지 런타임에 복원하는 변형은 VM 메모리에서 다시 찾습니다. 목적지는 실제 실행 edge 또는 `+r`/`-r` 보상 쓰기의 유일한 쌍으로 증명된 경우에만 패치합니다. VM이 안전 상한에 걸렸는데 이 증명이 없으면 멈출 수 있는 결과물을 생성하지 않습니다.
+Freeze 보호가 감지되면 런타임을 한 프레임 에뮬레이션해 `actualKey`를 복구하고, self-mod 체인, 실행 중 한 번만 관측된 transient 값, VM 메모리 스캔을 차례로 검사합니다. 구형 맵의 `STR `과 최신 맵의 `STRx`에 저장된 런타임 payload를 모두 실행합니다. 비용이 큰 기존 2^32 키 검색은 기본으로 실행하지 않으며 `--freeze-bruteforce-key`를 전달한 경우에만 마지막 폴백으로 사용합니다. STRx의 obf-jump는 정적 배열을 먼저 찾고, 보호기가 배열까지 런타임에 복원하는 변형은 VM 메모리에서 다시 찾습니다. 목적지는 실제 실행 edge 또는 `+r`/`-r` 보상 쓰기의 유일한 쌍으로 증명된 경우에만 패치합니다. VM이 안전 상한에 걸렸는데 이 증명이 없으면 멈출 수 있는 결과물을 생성하지 않습니다.
 
 출력 전에는 `scenario.chk` 크기, 원본 scenario 블록 공간, 블록 외 MPQ 바이트 불변성, 결과 CHK 재추출 일치를 검사합니다. 하나라도 실패하면 출력하지 않습니다. 이 기능은 Freeze 이전의 eudplib 소스, 변수명, 주석 또는 일반 트리거를 복원하지 않습니다.
 ## 사용 시 변질될 수 있는 정보

@@ -1,9 +1,19 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
 internal static partial class StarcraftMapUnprotector
 {
+    private sealed class FreezeSparseColumn
+    {
+        public int Column;
+        public uint Sum;
+        public int Confidence;
+        public List<int> Masks = new List<int>();
+    }
+
     private struct FreezeTypeByteCheck
     {
         public int DwordIndex;
@@ -156,6 +166,190 @@ internal static partial class StarcraftMapUnprotector
         recoveredKey = foundKey;
         return true;
     }
+
+    internal static bool TryRecoverFreezeKeyFromSparseTrigger(
+        byte[] trigData,
+        int totalTriggers,
+        out uint recoveredKey)
+    {
+        recoveredKey = 0;
+        int[] bestWlist = null;
+        uint bestFlag = 0;
+        int bestScore = -1;
+
+        for (int t = 0; t < totalTriggers; t++)
+        {
+            int offset = t * FreezeTrigSize;
+            uint flag = BitConverter.ToUInt32(trigData, offset + 2368);
+            if (flag < 0x80000000u)
+            {
+                continue;
+            }
+
+            int score;
+            int[] wlist;
+            if (TryInferSparseFreezeWlist(trigData, offset, out wlist, out score) && score > bestScore)
+            {
+                bestWlist = wlist;
+                bestFlag = GetFreezeCryptFlag(flag);
+                bestScore = score;
+            }
+        }
+
+        if (bestWlist == null)
+        {
+            Console.WriteLine("  Freeze sparse key  : no complete wlist inferred");
+            return false;
+        }
+
+        Console.WriteLine("  Freeze sparse key  : inferred wlist (confidence " + bestScore + ")");
+        uint candidate = RecoverFreezeKey(bestFlag, bestWlist);
+        var encrypted = new List<int>();
+        for (int t = 0; t < totalTriggers; t++)
+        {
+            if (BitConverter.ToUInt32(trigData, t * FreezeTrigSize + 2368) >= 0x80000000u)
+            {
+                encrypted.Add(t);
+            }
+        }
+        if (ValidateActualKeyAcrossTriggers(trigData, encrypted, candidate))
+        {
+            recoveredKey = candidate;
+            return true;
+        }
+
+        Console.WriteLine("  Freeze sparse key  : inferred wlist did not yield a valid key");
+        return false;
+    }
+
+    private static bool TryInferSparseFreezeWlist(
+        byte[] trigData,
+        int triggerOffset,
+        out int[] wlist,
+        out int score)
+    {
+        wlist = null;
+        score = 0;
+        var columns = new List<FreezeSparseColumn>();
+        for (int column = 0; column < FreezeStride; column++)
+        {
+            var counts = new Dictionary<uint, int>();
+            for (int row = 0; row < 8; row++)
+            {
+                uint encrypted = ReadUInt32LE(trigData, triggerOffset + (column + row * FreezeStride) * 4);
+                uint sum = unchecked(0u - encrypted);
+                int count;
+                counts.TryGetValue(sum, out count);
+                counts[sum] = count + 1;
+            }
+
+            KeyValuePair<uint, int> mode = counts.OrderByDescending(pair => pair.Value).First();
+            if (mode.Key != 0 && mode.Value >= 3)
+            {
+                columns.Add(new FreezeSparseColumn
+                {
+                    Column = column,
+                    Sum = mode.Key,
+                    Confidence = mode.Value
+                });
+            }
+        }
+
+        foreach (FreezeSparseColumn column in columns)
+        {
+            for (int a = 0; a < FreezeTabCount; a++)
+            {
+                uint sumA = FreezeMix2((uint)column.Column, (uint)a);
+                if (sumA == column.Sum)
+                {
+                    column.Masks.Add(1 << a);
+                }
+                for (int b = a + 1; b < FreezeTabCount; b++)
+                {
+                    uint sumB = unchecked(sumA + FreezeMix2((uint)column.Column, (uint)b));
+                    if (sumB == column.Sum)
+                    {
+                        column.Masks.Add((1 << a) | (1 << b));
+                    }
+                    for (int c = b + 1; c < FreezeTabCount; c++)
+                    {
+                        uint sumC = unchecked(sumB + FreezeMix2((uint)column.Column, (uint)c));
+                        if (sumC == column.Sum)
+                        {
+                            column.Masks.Add((1 << a) | (1 << b) | (1 << c));
+                        }
+                    }
+                }
+            }
+        }
+
+        FreezeSparseColumn[] usable = columns
+            .Where(column => column.Masks.Count > 0)
+            .OrderBy(column => column.Masks.Count)
+            .ThenByDescending(column => column.Confidence)
+            .ToArray();
+        int[] selectedMasks = new int[usable.Length];
+        if (!TryAssignSparseColumns(usable, 0, 0, selectedMasks))
+        {
+            return false;
+        }
+
+        var result = Enumerable.Repeat(-1, FreezeTabCount).ToArray();
+        for (int i = 0; i < usable.Length; i++)
+        {
+            int mask = selectedMasks[i];
+            for (int tab = 0; tab < FreezeTabCount; tab++)
+            {
+                if ((mask & (1 << tab)) != 0)
+                {
+                    result[tab] = usable[i].Column;
+                }
+            }
+            score += usable[i].Confidence;
+        }
+
+        if (result.Any(value => value < 0))
+        {
+            return false;
+        }
+
+        wlist = result;
+        return true;
+    }
+
+    private static bool TryAssignSparseColumns(
+        FreezeSparseColumn[] columns,
+        int index,
+        int usedMask,
+        int[] selectedMasks)
+    {
+        if (usedMask == 0xFFFF)
+        {
+            return true;
+        }
+        if (index >= columns.Length)
+        {
+            return false;
+        }
+
+        foreach (int mask in columns[index].Masks)
+        {
+            if ((mask & usedMask) != 0)
+            {
+                continue;
+            }
+            selectedMasks[index] = mask;
+            if (TryAssignSparseColumns(columns, index + 1, usedMask | mask, selectedMasks))
+            {
+                return true;
+            }
+        }
+
+        // A low-confidence column can be a coincidental plaintext repetition.
+        selectedMasks[index] = 0;
+        return TryAssignSparseColumns(columns, index + 1, usedMask, selectedMasks);
+    }
+
 
     private static int[] CollectEncryptedTriggerOffsets(byte[] trigData, int totalTriggers, int maxCount)
     {

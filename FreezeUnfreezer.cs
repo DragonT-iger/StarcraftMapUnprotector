@@ -50,26 +50,26 @@ internal static partial class StarcraftMapUnprotector
     private static FreezeUnfreezeResult BuildMelterFreezeChk(byte[] inputBytes, byte[] chk, Stats stats)
     {
         if (LooksLikeChk(inputBytes))
-            throw new InvalidDataException("Lv2 requires an MPQ .scx/.scm input; raw CHK has no Freeze keycalc context.");
+            throw new InvalidDataException("Freeze mode requires an MPQ .scx/.scm input; raw CHK has no keycalc context.");
 
         byte[] trig;
         if (!TryGetFirstChkSection(chk, "TRIG", out trig) || trig.Length == 0 || trig.Length % FreezeTrigSize != 0)
-            throw new InvalidDataException("Lv2: a valid TRIG section was not found.");
+            throw new InvalidDataException("Freeze: a valid TRIG section was not found.");
 
         List<int> encrypted = FindEncryptedFreezeTriggerIndexes(trig);
         if (!stats.IsFreezeProtected && encrypted.Count == 0)
-            throw new InvalidDataException("Lv2: this is not a Freeze-protected map.");
+            throw new InvalidDataException("Freeze: this is not a Freeze-protected map.");
 
         byte[] header;
         HashTable[] vmHashes;
         BlockTable[] vmBlocks;
         if (!TryRecoverFreezeVmTables(inputBytes, out header, out vmHashes, out vmBlocks))
-            throw new InvalidDataException("Lv2: MPQ hash/block tables could not be recovered for the Freeze VM.");
+            throw new InvalidDataException("Freeze: MPQ hash/block tables could not be recovered for the VM.");
 
         var watch = Stopwatch.StartNew();
         FreezeVmRunResult vmRun = RunFreezeVm(chk, trig, inputBytes, header, vmHashes, vmBlocks);
         watch.Stop();
-        Console.WriteLine("  Lv2 VM trace       : " + vmRun.TriggersExecuted + " triggers, stop=" + vmRun.StopReason);
+        Console.WriteLine("  Freeze VM trace    : " + vmRun.TriggersExecuted + " triggers, stop=" + vmRun.StopReason);
         if (vmRun.HitCap)
             Console.WriteLine("  WARNING: Freeze VM reached the trigger cap; attempting key validation from captured state.");
 
@@ -85,16 +85,36 @@ internal static partial class StarcraftMapUnprotector
             {
                 keyMethod = "memory-scan";
             }
+            else if (TryRecoverActualKeyFromStaticContext(
+                         inputBytes,
+                         chk.Length,
+                         trig,
+                         encrypted,
+                         stats,
+                         out actualKey))
+            {
+                keyMethod = "static-keycalc";
+            }
+            else if (TryRecoverFreezeKeyFromSparseTrigger(trig, trig.Length / FreezeTrigSize, out actualKey))
+            {
+                keyMethod = "sparse-wlist";
+            }
+            else if (stats.FreezeBruteforceKey)
+            {
+                Console.WriteLine("  Freeze: automatic key recovery failed; trying the optional 2^32 search...");
+                if (!TryRecoverFreezeKeyByFastBruteforce(trig, trig.Length / FreezeTrigSize, out actualKey))
+                    throw new InvalidDataException("Freeze: actualKey recovery failed in all strategies.");
+                keyMethod = "legacy-2^32";
+            }
             else
             {
-                Console.WriteLine("  Lv2: VM key recovery failed; trying the legacy 2^32 search...");
-                if (!TryRecoverFreezeKeyByFastBruteforce(trig, trig.Length / FreezeTrigSize, out actualKey))
-                    throw new InvalidDataException("Lv2: actualKey recovery failed in all strategies.");
-                keyMethod = "legacy-2^32";
+                throw new InvalidDataException(
+                    "Freeze: automatic actualKey recovery failed. Retry with --freeze-bruteforce-key " +
+                    "to enable the optional 2^32 search.");
             }
 
             if (!ValidateActualKeyAcrossTriggers(trig, encrypted, actualKey))
-                throw new InvalidDataException("Lv2: recovered actualKey failed cross-trigger validation.");
+                throw new InvalidDataException("Freeze: recovered actualKey failed cross-trigger validation.");
         }
 
         FreezePayloadLayout layout = AnalyzeFreezePayload(chk);
@@ -103,14 +123,14 @@ internal static partial class StarcraftMapUnprotector
         {
             objump = DetectFreezeObjump(chk, layout, vmRun.Vm, vmRun.Memory);
             if (objump == null)
-                throw new InvalidDataException("Lv2: obf-jump candidates exist but could not be proven; refusing to emit an edit-unsafe map.");
+                throw new InvalidDataException("Freeze: obf-jump candidates exist but could not be proven; refusing to emit an edit-unsafe map.");
             if (vmRun.HitCap && objump.Slots.Count == 0)
-                throw new InvalidDataException("Lv2: Freeze VM loop did not finish and no obf-jump defang was proven; refusing to emit a map that may hang.");
+                throw new InvalidDataException("Freeze: VM loop did not finish and no obf-jump defang was proven; refusing to emit a map that may hang.");
         }
         else
         {
             objump = new FreezeObjumpInfo();
-            Console.WriteLine("  Lv2 obf-jump scan : no STRx payload; treating as encryption-only Freeze variant");
+            Console.WriteLine("  Freeze obf-jump   : no STRx payload; treating as encryption-only variant");
         }
 
         byte[] patchedChk = (byte[])chk.Clone();
@@ -124,7 +144,7 @@ internal static partial class StarcraftMapUnprotector
                 int offset = index * FreezeTrigSize;
                 byte[] one = new byte[FreezeTrigSize];
                 if (!TryDecryptFreezeTrigger(decryptedTrig, offset, actualKey, one))
-                    throw new InvalidDataException("Lv2: trigger " + index + " could not be decrypted.");
+                    throw new InvalidDataException("Freeze: trigger " + index + " could not be decrypted.");
                 Buffer.BlockCopy(one, 0, decryptedTrig, offset, FreezeTrigSize);
                 uint oldFlag = BitConverter.ToUInt32(trig, offset + 2368);
                 WriteUInt32At(decryptedTrig, offset + 2368, oldFlag & 0x0Fu);
@@ -133,15 +153,15 @@ internal static partial class StarcraftMapUnprotector
         }
         patchedChk = ReplaceTrigSection(patchedChk, decryptedTrig);
         if (patchedChk.Length != chk.Length)
-            throw new InvalidDataException("Lv2: Freeze patch unexpectedly resized scenario.chk.");
+            throw new InvalidDataException("Freeze: patch unexpectedly resized scenario.chk.");
 
         stats.DecryptedFreezeTriggers = decrypted;
-        Console.WriteLine("  Lv2 VM             : " + vmRun.TriggersExecuted + " triggers, " +
+        Console.WriteLine("  Freeze VM          : " + vmRun.TriggersExecuted + " triggers, " +
                           vmRun.Vm.ActionsExecuted + " actions, " + watch.ElapsedMilliseconds + " ms");
-        Console.WriteLine("  Lv2 key method     : " + keyMethod +
+        Console.WriteLine("  Freeze key method  : " + keyMethod +
                           (encrypted.Count > 0 ? " actualKey=0x" + actualKey.ToString("X8") : ""));
-        Console.WriteLine("  Lv2 decrypted      : " + decrypted + "/" + encrypted.Count);
-        Console.WriteLine("  Lv2 obf-jumps      : " + objump.Slots.Count + " defanged");
+        Console.WriteLine("  Freeze decrypted   : " + decrypted + "/" + encrypted.Count);
+        Console.WriteLine("  Freeze obf-jumps   : " + objump.Slots.Count + " defanged");
 
         return new FreezeUnfreezeResult
         {
@@ -433,12 +453,32 @@ internal static partial class StarcraftMapUnprotector
             if (ValidateActualKeyAcrossTriggers(trig, encrypted, candidate.Value))
             {
                 key = candidate.Value;
-                Console.WriteLine("  Lv2 self-mod       : candidates=" + ranked.Count +
+                Console.WriteLine("  Freeze self-mod    : candidates=" + ranked.Count +
                                   " chain=" + candidate.ChainLength + " slot=0x" + candidate.Slot.ToString("X8"));
                 return true;
             }
         }
-        Console.WriteLine("  Lv2 self-mod       : " + ranked.Count + " candidates, no validated key");
+
+        // Some Freeze variants write the key only once before reusing the
+        // same self-modifying slot for other values. Those slots are marked
+        // MultipleValues or have Count == 1, so the stable-chain ranking
+        // above intentionally excludes them. Their first observed values are
+        // still a small, VM-derived candidate set and require no key-space
+        // search.
+        var transientValues = new HashSet<uint>();
+        foreach (FreezeSelfModWriteSummary summary in vm.SelfModWrites.Values)
+            transientValues.Add(summary.Value);
+        foreach (uint candidate in transientValues)
+        {
+            if (ValidateActualKeyAcrossTriggers(trig, encrypted, candidate))
+            {
+                key = candidate;
+                Console.WriteLine("  Freeze self-mod    : transient candidate among " +
+                                  transientValues.Count + " values");
+                return true;
+            }
+        }
+        Console.WriteLine("  Freeze self-mod    : " + ranked.Count + " candidates, no validated key");
         return false;
     }
 
@@ -482,19 +522,94 @@ internal static partial class StarcraftMapUnprotector
             if (ValidateActualKeyAcrossTriggers(trig, encrypted, candidate))
             {
                 key = candidate;
-                Console.WriteLine("  Lv2 memory scan    : " + candidates.Count + " dwords, direct key");
+                Console.WriteLine("  Freeze memory scan : " + candidates.Count + " dwords, direct key");
                 return true;
             }
             uint mixed = FreezeMix2(candidate, cryptKey);
             if (ValidateActualKeyAcrossTriggers(trig, encrypted, mixed))
             {
                 key = mixed;
-                Console.WriteLine("  Lv2 memory scan    : " + candidates.Count + " dwords, mixed key");
+                Console.WriteLine("  Freeze memory scan : " + candidates.Count + " dwords, mixed key");
                 return true;
             }
         }
-        Console.WriteLine("  Lv2 memory scan    : " + candidates.Count + " dwords, no key");
+        Console.WriteLine("  Freeze memory scan : " + candidates.Count + " dwords, no key");
         return false;
+    }
+
+    private static bool TryRecoverActualKeyFromStaticContext(
+        byte[] inputBytes,
+        int chkLength,
+        byte[] trig,
+        List<int> encrypted,
+        Stats stats,
+        out uint key)
+    {
+        key = 0;
+        var baseCandidates = new HashSet<uint>();
+        AddFreezeKeyArrayCandidates(baseCandidates, stats.FreezeSeedKey);
+        AddFreezeKeyArrayCandidates(baseCandidates, stats.FreezeDestKey);
+
+        MpqTableLocation tables = LocateScenarioTablesForPatch(inputBytes) ??
+                                  LocateFreezeScenarioTablesForPatch(inputBytes, chkLength);
+        if (tables != null)
+        {
+            try
+            {
+                BlockTable scenario = tables.Blocks[tables.ScenarioBlockIndex];
+                StaticKeycalcResult model = ComputeStaticKeycalcCandidate(
+                    inputBytes,
+                    tables,
+                    scenario,
+                    tables.Header.HashTableOffset,
+                    tables.Header.BlockTableOffset);
+                baseCandidates.Add(model.CryptKeyVal);
+                AddFreezeKeyArrayCandidates(baseCandidates, model.SeedKey);
+            }
+            catch
+            {
+            }
+        }
+
+        var candidates = new HashSet<uint>(baseCandidates);
+        uint[] values = baseCandidates.ToArray();
+        for (int i = 0; i < values.Length; i++)
+        {
+            for (int j = 0; j < values.Length; j++)
+            {
+                candidates.Add(FreezeMix2(values[i], values[j]));
+            }
+        }
+
+        foreach (uint candidate in candidates)
+        {
+            if (ValidateActualKeyAcrossTriggers(trig, encrypted, candidate))
+            {
+                key = candidate;
+                Console.WriteLine("  Freeze static key  : candidate among " + candidates.Count + " values");
+                return true;
+            }
+        }
+
+        Console.WriteLine("  Freeze static key  : " + candidates.Count + " candidates, no key");
+        return false;
+    }
+
+    private static void AddFreezeKeyArrayCandidates(HashSet<uint> candidates, uint[] values)
+    {
+        if (values == null || values.Length == 0)
+        {
+            return;
+        }
+
+        foreach (uint value in values)
+        {
+            candidates.Add(value);
+        }
+        if (values.Length >= 4)
+        {
+            candidates.Add(ComputeCryptKeyVal(values));
+        }
     }
 
     private static bool IsFreezePayloadAddress(uint address)
@@ -539,7 +654,7 @@ internal static partial class StarcraftMapUnprotector
             }
         }
 
-        Console.WriteLine("  Lv2 obf-jump scan : " + candidates.Count + " static candidate(s)");
+        Console.WriteLine("  Freeze obf-jump   : " + candidates.Count + " static candidate(s)");
         if (candidates.Count == 0)
         {
             int relative = 0;
@@ -571,7 +686,7 @@ internal static partial class StarcraftMapUnprotector
                     relative++;
                 }
             }
-            Console.WriteLine("  Lv2 obf-jump scan : " + candidates.Count + " runtime candidate(s)");
+            Console.WriteLine("  Freeze obf-jump   : " + candidates.Count + " runtime candidate(s)");
         }
         FreezeObjumpInfo best = null;
         foreach (FreezeObjumpInfo candidate in candidates)
@@ -587,7 +702,7 @@ internal static partial class StarcraftMapUnprotector
                 if (!edges.TryGetValue(unchecked(slot + 4u), out nextExecuted))
                 {
                     uint inferredTarget;
-                    if (candidate.FromRuntime && TryInferFreezeObjumpTarget(slot, begin, end, memory, out inferredTarget))
+                    if (TryInferFreezeObjumpTarget(slot, begin, end, memory, out inferredTarget))
                     {
                         candidate.Targets.Add(inferredTarget);
                         verified++;
@@ -613,7 +728,7 @@ internal static partial class StarcraftMapUnprotector
         }
         if (best == null && candidates.Count == 0) return new FreezeObjumpInfo();
         if (best != null)
-            Console.WriteLine("  Lv2 obf-jump proof: " + (best.FromRuntime ? "runtime" : "static") +
+            Console.WriteLine("  Freeze jump proof : " + (best.FromRuntime ? "runtime" : "static") +
                               " slots=" + best.Slots.Count +
                               " execution=" + best.ExecutionProofs +
                               " compensation=" + best.CompensationProofs);
@@ -671,7 +786,7 @@ internal static partial class StarcraftMapUnprotector
         foreach (KeyValuePair<int, uint> write in writes)
         {
             if (write.Key < 0 || write.Key + 4 > chk.Length)
-                throw new InvalidDataException("Lv2: obf-jump patch offset is outside scenario.chk.");
+                throw new InvalidDataException("Freeze: obf-jump patch offset is outside scenario.chk.");
         }
         foreach (KeyValuePair<int, uint> write in writes) WriteUInt32At(chk, write.Key, write.Value);
     }
@@ -680,7 +795,7 @@ internal static partial class StarcraftMapUnprotector
     {
         if (address < layout.PayloadMemoryAddress ||
             address + 4u > unchecked(layout.PayloadMemoryAddress + (uint)layout.PayloadSize))
-            throw new InvalidDataException("Lv2: obf-jump address 0x" + address.ToString("X8") + " is outside STRx payload.");
+            throw new InvalidDataException("Freeze: obf-jump address 0x" + address.ToString("X8") + " is outside STRx payload.");
         return checked(layout.StrxChkOffset + layout.PayloadStrxOffset + (int)(address - layout.PayloadMemoryAddress));
     }
 

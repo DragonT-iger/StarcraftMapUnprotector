@@ -33,7 +33,7 @@ internal static partial class StarcraftMapUnprotector
             }
 
             int size = (int)size32;
-            if (pos + 8 + size > data.Length)
+            if (pos + 8L + size > data.Length)
             {
                 break;
             }
@@ -53,7 +53,7 @@ internal static partial class StarcraftMapUnprotector
         return sections;
     }
 
-    private static byte[] BuildLv2Chk(byte[] chk, Stats stats)
+    private static byte[] BuildFreezeChk(byte[] chk, Stats stats)
     {
         byte[] result = (byte[])chk.Clone();
         int pos = 0;
@@ -69,7 +69,7 @@ internal static partial class StarcraftMapUnprotector
             }
 
             int size = (int)size32;
-            if (pos + 8 + size > result.Length)
+            if (pos + 8L + size > result.Length)
             {
                 break;
             }
@@ -92,7 +92,7 @@ internal static partial class StarcraftMapUnprotector
 
         if (trigSections == 0)
         {
-            Console.WriteLine("  WARNING: Lv2 mode did not find a TRIG section to patch.");
+            Console.WriteLine("  WARNING: Freeze mode did not find a TRIG section to patch.");
         }
 
         return result;

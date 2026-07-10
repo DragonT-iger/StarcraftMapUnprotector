@@ -72,7 +72,7 @@ internal static partial class StarcraftMapUnprotector
         public int TableWalkSamples;
     }
 
-    private static byte[] BuildStaticLv2Chk(string input, byte[] inputBytes, byte[] chk, Stats stats)
+    private static byte[] BuildStaticFreezeChk(string input, byte[] inputBytes, byte[] chk, Stats stats)
     {
         return BuildMelterFreezeChk(inputBytes, chk, stats).Chk;
     }
@@ -113,9 +113,9 @@ internal static partial class StarcraftMapUnprotector
         }
     }
 
-    private static void RunLv2Diagnostics(string input, byte[] inputBytes, byte[] chk, Stats stats)
+    private static void RunFreezeDiagnostics(string input, byte[] inputBytes, byte[] chk, Stats stats)
     {
-        Console.WriteLine("Lv2 Melter-compatible dry run");
+        Console.WriteLine("Freeze static-restore dry run");
         Console.WriteLine("Input : " + input);
         Console.WriteLine("CHK   : " + chk.Length + " bytes");
         if (stats.MpqDeepRecoveryDetail.Length > 0) Console.WriteLine("MPQ recovery: " + stats.MpqDeepRecoveryDetail);
@@ -127,9 +127,9 @@ internal static partial class StarcraftMapUnprotector
         }
 
         FreezeUnfreezeResult result = BuildMelterFreezeChk(inputBytes, chk, stats);
-        Lv2MpqPatchResult patch = BuildLv2MpqPatch(inputBytes, result.Chk);
-        ValidateLv2MpqPatch(inputBytes, result.Chk, patch);
-        Console.WriteLine("  Lv2 in-place       : feasible (" + patch.PackedLength + "/" +
+        FreezeMpqPatchResult patch = BuildFreezeMpqPatch(inputBytes, chk, result.Chk);
+        ValidateFreezeMpqPatch(inputBytes, result.Chk, patch);
+        Console.WriteLine("  Freeze in-place    : feasible (" + patch.PackedLength + "/" +
                           patch.OriginalCompSize + " bytes)");
         Console.WriteLine("  Dry run complete   : no output written");
     }
@@ -288,7 +288,7 @@ internal static partial class StarcraftMapUnprotector
         return parts.Count == 0 ? "(none)" : string.Join(",", parts.ToArray());
     }
 
-    private static void PrintLv2KeycalcInputDiff(byte[] inputBytes, byte[] chk, byte[] trigData, uint recoveredKey, bool clearExecFlags, bool forcePlayerSlots)
+    private static void PrintFreezeKeycalcInputDiff(byte[] inputBytes, byte[] chk, byte[] trigData, uint recoveredKey, bool clearExecFlags, bool forcePlayerSlots)
     {
         if (LooksLikeChk(inputBytes))
         {
@@ -298,10 +298,10 @@ internal static partial class StarcraftMapUnprotector
 
         try
         {
-            byte[] lv2Trig = (byte[])trigData.Clone();
-            DecryptAllFreezeTriggers(lv2Trig, recoveredKey, false, clearExecFlags, forcePlayerSlots);
-            byte[] lv2Chk = ReplaceTrigSection(chk, lv2Trig);
-            Lv2MpqPatchResult patch = BuildLv2MpqPatch(inputBytes, lv2Chk);
+            byte[] freezeTrig = (byte[])trigData.Clone();
+            DecryptAllFreezeTriggers(freezeTrig, recoveredKey, false, clearExecFlags, forcePlayerSlots);
+            byte[] freezeChk = ReplaceTrigSection(chk, freezeTrig);
+            FreezeMpqPatchResult patch = BuildFreezeMpqPatch(inputBytes, chk, freezeChk);
 
             PrintKeycalcCandidateDiff(inputBytes, patch.File, patch.Tables);
         }
@@ -313,7 +313,7 @@ internal static partial class StarcraftMapUnprotector
 
     private static void PrintKeycalcCandidateDiff(byte[] originalFile, byte[] patchedFile, MpqTableLocation tables)
     {
-        Console.WriteLine("keycalc candidate diff : original MPQ vs Lv2 patched MPQ");
+        Console.WriteLine("keycalc candidate diff : original MPQ vs Freeze-patched MPQ");
 
         var segments = new List<KeycalcInputSegment>();
         BlockTable block = tables.Blocks[tables.ScenarioBlockIndex];

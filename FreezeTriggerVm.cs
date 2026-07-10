@@ -190,10 +190,22 @@ internal static partial class StarcraftMapUnprotector
         public void LoadChkSections(byte[] chk)
         {
             byte[] section;
+            byte[] stringSection = null;
             if (TryGetFirstChkSection(chk, "STRx", out section) && section.Length > 0)
             {
-                memory.DeallocRange(FreezeSc.StrxSectionAlloc, (uint)section.Length);
-                memory.Alloc(FreezeSc.StrxSectionAlloc, section, "STRx");
+                stringSection = section;
+            }
+            else if (TryGetFirstChkSection(chk, "STR ", out section) && section.Length > 0)
+            {
+                // Older Freeze variants store their runtime trigger payload in
+                // the legacy string table instead of STRx. StarCraft exposes
+                // either table through the same runtime string allocation.
+                stringSection = section;
+            }
+            if (stringSection != null)
+            {
+                memory.DeallocRange(FreezeSc.StrxSectionAlloc, (uint)stringSection.Length);
+                memory.Alloc(FreezeSc.StrxSectionAlloc, stringSection, "String table");
             }
             if (TryGetFirstChkSection(chk, "MRGN", out section))
                 WriteLimited(FreezeSc.MrgnTable, section, 5100);

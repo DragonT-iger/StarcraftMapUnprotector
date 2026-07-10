@@ -12,11 +12,11 @@ using System.IO;
 // Why size-invariant matters: the Freeze runtime's keycalc() re-derives seedKey from
 // raw MPQ bytes including scenario.chk's sector offset table. Any size change shifts
 // those bytes, breaks initOffsets/oJumper nextptr restoration, and kills the whole map
-// (the documented Lv2 failure). So we:
+// (the documented Freeze in-place failure). So we:
 //   1. write a PlayWAV into a free action slot of an existing plaintext, non-EUD,
 //      executing trigger — keeping the TRIG section (and the whole CHK) the same length;
 //   2. reuse a WAV string the map already references (no STR edit, no new MPQ file);
-//   3. repack through the existing sector-preserving in-place patch (BuildLv2MpqPatch),
+//   3. repack through the existing sector-preserving in-place patch (BuildFreezeMpqPatch),
 //      which keeps the sector offset table — and thus keycalc input — unchanged.
 //
 // Subtlety we learned the hard way: even a same-length CHK edit can fail if the edited
@@ -111,10 +111,10 @@ internal static partial class StarcraftMapUnprotector
                 trial[ao + 27] = 0;        // modifier (unused)
                 trial[ao + 28] = refFlags; // flags (enabled)
 
-                Lv2MpqPatchResult patch;
+                FreezeMpqPatchResult patch;
                 try
                 {
-                    patch = BuildLv2MpqPatch(inputBytes, trial);
+                    patch = BuildFreezeMpqPatch(inputBytes, chk, trial);
                 }
                 catch (InvalidDataException)
                 {

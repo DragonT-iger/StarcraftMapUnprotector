@@ -13,7 +13,7 @@ internal static partial class StarcraftMapUnprotector
     {
         try
         {
-            var stats = new Stats { FreezeBruteforceKey = true };
+            var stats = new Stats { FreezeBruteforceKey = FreezeBruteforceKey };
             byte[] inputBytes = File.ReadAllBytes(input);
 
             uint[] seedKey, destKey;
@@ -46,6 +46,12 @@ internal static partial class StarcraftMapUnprotector
                 totalTriggers = trigData.Length / FreezeTrigSize;
                 var encrypted = CollectEncryptedFreezeTriggerInfos(trigData, totalTriggers);
                 encryptedCount = encrypted.Count;
+                if (encryptedCount > 0 && !stats.FreezeBruteforceKey)
+                {
+                    Console.Error.WriteLine(
+                        "Encrypted Freeze triggers require --freeze-bruteforce-key for a decrypted report.");
+                    return false;
+                }
                 if (encryptedCount > 0)
                 {
                     if (TryRecoverFreezeKeyByFastBruteforce(trigData, totalTriggers, out recoveredKey))
@@ -400,7 +406,7 @@ internal static partial class StarcraftMapUnprotector
     {
         try
         {
-            var stats = new Stats { FreezeBruteforceKey = true };
+            var stats = new Stats { FreezeBruteforceKey = FreezeBruteforceKey };
             byte[] inputBytes = File.ReadAllBytes(input);
 
             uint[] seedKey, destKey;
@@ -429,7 +435,13 @@ internal static partial class StarcraftMapUnprotector
             byte[] trigData = (byte[])trigList[0].Clone();
             int totalTriggers = trigData.Length / FreezeTrigSize;
             var encrypted = CollectEncryptedFreezeTriggerInfos(trigData, totalTriggers);
-            if (encrypted.Count > 0)
+            if (encrypted.Count > 0 && !stats.FreezeBruteforceKey)
+            {
+                Console.Error.WriteLine(
+                    "Encrypted Freeze triggers require --freeze-bruteforce-key for an EUD histogram.");
+                return false;
+            }
+            if (encrypted.Count > 0 && stats.FreezeBruteforceKey)
             {
                 uint key;
                 if (TryRecoverFreezeKeyByFastBruteforce(trigData, totalTriggers, out key))

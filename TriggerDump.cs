@@ -16,7 +16,7 @@ internal static partial class StarcraftMapUnprotector
     {
         try
         {
-            var stats = new Stats { FreezeBruteforceKey = true };
+            var stats = new Stats { FreezeBruteforceKey = FreezeBruteforceKey };
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);
 
@@ -48,6 +48,13 @@ internal static partial class StarcraftMapUnprotector
 
             if (encrypted.Count > 0)
             {
+                if (!stats.FreezeBruteforceKey)
+                {
+                    Console.Error.WriteLine(
+                        "Encrypted Freeze triggers require --freeze-bruteforce-key for a decrypted dump.");
+                    return false;
+                }
+
                 uint recoveredKey;
                 if (!TryRecoverFreezeKeyByFastBruteforce(trigData, totalTriggers, out recoveredKey))
                 {
@@ -78,7 +85,7 @@ internal static partial class StarcraftMapUnprotector
     {
         try
         {
-            var stats = new Stats { FreezeBruteforceKey = true };
+            var stats = new Stats { FreezeBruteforceKey = FreezeBruteforceKey };
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);
 
@@ -109,10 +116,12 @@ internal static partial class StarcraftMapUnprotector
 
             List<DecryptedTriggerInfo> encrypted = CollectEncryptedFreezeTriggerInfos(trigData, totalTriggers);
             uint recoveredKey = 0;
-            if (encrypted.Count > 0)
+            bool keyRecovered = false;
+            if (encrypted.Count > 0 && stats.FreezeBruteforceKey)
             {
                 if (TryRecoverFreezeKeyByFastBruteforce(trigData, totalTriggers, out recoveredKey))
                 {
+                    keyRecovered = true;
                     Console.WriteLine("  Key 0x" + recoveredKey.ToString("X8") +
                                       " validated. Decrypting for full dump...");
                     DecryptAllFreezeTriggers(trigData, recoveredKey, true);
@@ -158,7 +167,7 @@ internal static partial class StarcraftMapUnprotector
                     if (execFlags != 0) isDisabled = false;
 
                     string tag;
-                    if (isEncrypted) tag = "[DECRYPTED]";
+                    if (isEncrypted) tag = keyRecovered ? "[DECRYPTED]" : "[ENCRYPTED]";
                     else if (isDisabled) tag = "[DISABLED]";
                     else if (isEud) tag = "[EUD-VM]";
                     else tag = "[GAME]";

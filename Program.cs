@@ -11,9 +11,6 @@ internal static partial class StarcraftMapUnprotector
     private const int UnitTypeCount = 228;
     private const int UnitNameStringOffset = 14 * UnitTypeCount;
 
-    // When set, the extracted scenario.chk is repackaged as-is with no normalization.
-    private static bool RawChkMode;
-
     // When set, apply this runtime memory dump (from freeze_dump.lua) instead of brute-force.
     private static string ApplyDumpPath;
 
@@ -23,11 +20,11 @@ internal static partial class StarcraftMapUnprotector
     // When set, brute-force the final Freeze triggerKey directly from encrypted TRIG data.
     private static bool FreezeBruteforceKey;
 
-    // When set, output a Lv2 (game-playable) file through the static Freeze restore pipeline.
-    private static bool Lv2Mode;
+    // When set, output a game-playable file through the static Freeze restore pipeline.
+    private static bool FreezeMode;
 
-    // When set, print Lv2 static-restore diagnostics without writing an output file.
-    private static bool Lv2DiagMode;
+    // When set, print static Freeze restore diagnostics without writing an output file.
+    private static bool FreezeDiagMode;
 
     // When set, only dump Freeze05-decrypted TRIG records to this text file.
     private static string DumpDecryptedTriggersPath;
@@ -103,8 +100,8 @@ internal static partial class StarcraftMapUnprotector
         public string FreezeDumpPath;       // path for EUD trigger CSV debug dump
         public string FreezeApplyDumpPath;  // path for CE runtime binary dump (--apply-dump)
         public bool FreezeBruteforceKey;    // enable file-only triggerKey brute-force
-        public bool Lv2Mode;               // output game-playable file via static Freeze restore
-        public bool Lv2DiagMode;           // print static Freeze restore diagnostics only
+        public bool FreezeMode;            // output game-playable file via static Freeze restore
+        public bool FreezeDiagMode;        // print static Freeze restore diagnostics only
     }
 
     private sealed class MpqFileEntry
@@ -159,10 +156,6 @@ internal static partial class StarcraftMapUnprotector
             {
                 pauseOnExit = false;
             }
-            else if (args[i] == "--raw-chk")
-            {
-                RawChkMode = true;
-            }
             else if (args[i] == "--apply-dump" && i + 1 < args.Length)
             {
                 applyDumpPath = Path.GetFullPath(args[++i]);
@@ -175,35 +168,29 @@ internal static partial class StarcraftMapUnprotector
             {
                 FreezeBruteforceKey = true;
             }
-            else if (args[i] == "--lv2")
+            else if (args[i] == "--freeze")
             {
-                Lv2Mode = true;
-                FreezeBruteforceKey = true;
+                FreezeMode = true;
             }
-            else if (args[i] == "--lv2-diag")
+            else if (args[i] == "--diag")
             {
-                Lv2DiagMode = true;
-                FreezeBruteforceKey = true;
+                FreezeDiagMode = true;
             }
             else if (args[i] == "--dump-decrypted-triggers" && i + 1 < args.Length)
             {
                 DumpDecryptedTriggersPath = Path.GetFullPath(args[++i]);
-                FreezeBruteforceKey = true;
             }
             else if (args[i] == "--dump-all-triggers" && i + 1 < args.Length)
             {
                 DumpAllTriggersPath = Path.GetFullPath(args[++i]);
-                FreezeBruteforceKey = true;
             }
             else if (args[i] == "--report" && i + 1 < args.Length)
             {
                 ReportPath = Path.GetFullPath(args[++i]);
-                FreezeBruteforceKey = true;
             }
             else if (args[i] == "--eud-histogram" && i + 1 < args.Length)
             {
                 EudHistogramPath = Path.GetFullPath(args[++i]);
-                FreezeBruteforceKey = true;
             }
             else if (args[i] == "--inject-sound" && i + 1 < args.Length)
             {
@@ -258,13 +245,12 @@ internal static partial class StarcraftMapUnprotector
             Console.WriteLine("No arguments: unprotects every .scx/.scm file in Maps\\Originals to Maps\\Outputs.");
             Console.WriteLine("Options:");
             Console.WriteLine("  --no-pause            Close immediately when finished.");
-            Console.WriteLine("  --raw-chk             Repack CHK as-is without normalization.");
             Console.WriteLine("  --apply-dump <file>   Legacy diagnostic: apply a runtime trigger dump.");
-            Console.WriteLine("                        Not reliable for Lv2 because Freeze re-encrypts every frame.");
+            Console.WriteLine("                        Not reliable for Freeze because it re-encrypts every frame.");
             Console.WriteLine("  --freeze-bruteforce-key");
-            Console.WriteLine("                        Brute-force the final Freeze triggerKey from encrypted TRIG data.");
-            Console.WriteLine("  --lv2                 Decrypt Freeze triggers and patch the original MPQ in place.");
-            Console.WriteLine("  --lv2-diag            Dry-run Freeze VM, key, defang, and MPQ readback checks.");
+            Console.WriteLine("                        Enable the optional 2^32 key-search fallback.");
+            Console.WriteLine("  --freeze              Force Freeze restore; protected maps are auto-detected by default.");
+            Console.WriteLine("  --diag                Dry-run Freeze VM, key, defang, and MPQ readback checks.");
             Console.WriteLine("  --dump-decrypted-triggers <txt>");
             Console.WriteLine("                        Dump only Freeze05-decrypted TRIG records as text.");
             Console.WriteLine("  --report <md>         Write a human-facing map analysis report (Markdown).");
@@ -274,7 +260,8 @@ internal static partial class StarcraftMapUnprotector
         }
 
         string input = Path.GetFullPath(args[0]);
-        string output = args.Length >= 2
+        bool automaticOutputName = args.Length < 2;
+        string output = !automaticOutputName
             ? Path.GetFullPath(args[1])
             : Path.Combine(
                 Path.GetDirectoryName(input) ?? ".",
@@ -312,7 +299,7 @@ internal static partial class StarcraftMapUnprotector
         }
 
         bool usedDeepRecovery;
-        return UnprotectOne(input, output, out usedDeepRecovery) ? 0 : 3;
+        return UnprotectOne(input, output, automaticOutputName, out usedDeepRecovery) ? 0 : 3;
     }
 
     private static int RunBatchFromDefaultFolders()
@@ -338,6 +325,8 @@ internal static partial class StarcraftMapUnprotector
         FileInfo[] maps = new DirectoryInfo(inputDir)
             .GetFiles()
             .Where(file => allowedExtensions.Contains(file.Extension, StringComparer.OrdinalIgnoreCase))
+            .Where(file => file.Name.IndexOf(".unprotected.", StringComparison.OrdinalIgnoreCase) < 0)
+            .Where(file => file.Name.IndexOf(".unfreezed.", StringComparison.OrdinalIgnoreCase) < 0)
             .OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -353,17 +342,14 @@ internal static partial class StarcraftMapUnprotector
 
         foreach (FileInfo map in maps)
         {
-            string outputName = map.Name.IndexOf(".unprotected.", StringComparison.OrdinalIgnoreCase) >= 0
-                ? map.Name
-                : Path.GetFileNameWithoutExtension(map.Name) + ".unprotected" + map.Extension;
-            string output = Path.Combine(outputDir, outputName);
+            string output = Path.Combine(outputDir, map.Name);
 
             Console.WriteLine("============================================================");
-            Console.WriteLine(map.Name + " -> " + outputName);
+            Console.WriteLine(map.Name + " -> automatic output name");
             Console.WriteLine("============================================================");
 
             bool usedDeepRecovery;
-            if (UnprotectOne(map.FullName, output, out usedDeepRecovery))
+            if (UnprotectOne(map.FullName, output, true, out usedDeepRecovery))
             {
                 ok++;
             }
@@ -389,7 +375,11 @@ internal static partial class StarcraftMapUnprotector
         return failed == 0 ? 0 : 3;
     }
 
-    private static bool UnprotectOne(string input, string output, out bool usedDeepRecovery)
+    private static bool UnprotectOne(
+        string input,
+        string output,
+        bool automaticOutputName,
+        out bool usedDeepRecovery)
     {
         usedDeepRecovery = false;
         try
@@ -398,13 +388,13 @@ internal static partial class StarcraftMapUnprotector
             {
                 FreezeApplyDumpPath = ApplyDumpPath,
                 FreezeBruteforceKey = FreezeBruteforceKey,
-                Lv2Mode = Lv2Mode,
-                Lv2DiagMode = Lv2DiagMode,
+                FreezeMode = FreezeMode,
+                FreezeDiagMode = FreezeDiagMode,
             };
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);
-            if ((Lv2Mode || Lv2DiagMode) && LooksLikeChk(inputBytes))
-                throw new InvalidDataException("--lv2 and --lv2-diag require an MPQ .scx/.scm input, not raw CHK.");
+            if ((FreezeMode || FreezeDiagMode) && LooksLikeChk(inputBytes))
+                throw new InvalidDataException("--freeze and --diag require an MPQ .scx/.scm input, not raw CHK.");
 
             uint[] freezeSeedKey, freezeDestKey;
             if (DetectFreezeProtection(inputBytes, out freezeSeedKey, out freezeDestKey))
@@ -412,8 +402,15 @@ internal static partial class StarcraftMapUnprotector
                 stats.IsFreezeProtected = true;
                 stats.FreezeSeedKey = freezeSeedKey;
                 stats.FreezeDestKey = freezeDestKey;
-                stats.FreezeDumpPath = output + ".freeze_dump.csv";
             }
+            stats.FreezeMode = stats.FreezeMode || stats.IsFreezeProtected;
+
+            if (automaticOutputName)
+            {
+                string outputDirectory = Path.GetDirectoryName(output) ?? Path.GetDirectoryName(input) ?? ".";
+                output = BuildAutomaticOutputPath(input, outputDirectory, stats.FreezeMode);
+            }
+            stats.FreezeDumpPath = output + ".freeze_dump.csv";
 
             byte[] chk;
             if (LooksLikeChk(inputBytes))
@@ -432,23 +429,21 @@ internal static partial class StarcraftMapUnprotector
                 throw new InvalidDataException("scenario.chk could not be parsed.");
             }
 
-            if (Lv2DiagMode)
+            if (FreezeDiagMode)
             {
-                RunLv2Diagnostics(input, inputBytes, chk, stats);
+                RunFreezeDiagnostics(input, inputBytes, chk, stats);
                 usedDeepRecovery = stats.MpqDeepRecoveryUsed > 0;
                 return true;
             }
 
-            bool lv2InPlace = Lv2Mode && !LooksLikeChk(inputBytes);
-            byte[] normalized = RawChkMode
-                ? chk
-                : lv2InPlace
-                    ? BuildStaticLv2Chk(input, inputBytes, chk, stats)
-                    : BuildNormalizedChk(sections, stats);
+            bool freezeInPlace = stats.FreezeMode && !LooksLikeChk(inputBytes);
+            byte[] normalized = freezeInPlace
+                ? BuildStaticFreezeChk(input, inputBytes, chk, stats)
+                : BuildNormalizedChk(sections, stats);
             DumpChkSections(normalized);
-            if (lv2InPlace)
+            if (freezeInPlace)
             {
-                WriteLv2Mpq(input, output, normalized, BuildFreezeBlob(stats));
+                WriteFreezeMpq(input, output, chk, normalized, BuildFreezeBlob(stats));
             }
             else
             {
@@ -501,8 +496,23 @@ internal static partial class StarcraftMapUnprotector
         catch (Exception ex)
         {
             Console.Error.WriteLine("Failed: " + ex.Message);
+            if (string.Equals(Environment.GetEnvironmentVariable("SCMU_DEBUG"), "1", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine(ex.ToString());
+            }
             return false;
         }
+    }
+
+    private static string BuildAutomaticOutputPath(string input, string outputDirectory, bool freezeMode)
+    {
+        string extension = Path.GetExtension(input);
+        string baseName = Path.GetFileNameWithoutExtension(input);
+        string suffix = freezeMode ? ".unfreezed" : ".unprotected";
+        string outputName = baseName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            ? baseName + extension
+            : baseName + suffix + extension;
+        return Path.Combine(outputDirectory, outputName);
     }
 
     private static void DumpChkSections(byte[] chk)

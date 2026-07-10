@@ -132,17 +132,17 @@ internal static partial class StarcraftMapUnprotector
         return DecryptAllFreezeTriggers(trigData, key, false);
     }
 
-    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveLv2FlagPayload)
+    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveFreezeFlagPayload)
     {
-        return DecryptAllFreezeTriggers(trigData, key, preserveLv2FlagPayload, false);
+        return DecryptAllFreezeTriggers(trigData, key, preserveFreezeFlagPayload, false);
     }
 
-    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveLv2FlagPayload, bool clearExecFlags)
+    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveFreezeFlagPayload, bool clearExecFlags)
     {
-        return DecryptAllFreezeTriggers(trigData, key, preserveLv2FlagPayload, clearExecFlags, false);
+        return DecryptAllFreezeTriggers(trigData, key, preserveFreezeFlagPayload, clearExecFlags, false);
     }
 
-    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveLv2FlagPayload, bool clearExecFlags, bool forcePlayerSlots)
+    private static int DecryptAllFreezeTriggers(byte[] trigData, uint key, bool preserveFreezeFlagPayload, bool clearExecFlags, bool forcePlayerSlots)
     {
         int totalTriggers = trigData.Length / FreezeTrigSize;
         int decrypted = 0;
@@ -160,7 +160,7 @@ internal static partial class StarcraftMapUnprotector
 
             uint restoredFlag = clearExecFlags
                 ? 0u
-                : preserveLv2FlagPayload
+                : preserveFreezeFlagPayload
                 ? flag - 0x80000000u
                 : (flag - 0x80000000u) & 0x0F;
             trigData[offset + 2368] = (byte)restoredFlag;
@@ -349,7 +349,7 @@ internal static partial class StarcraftMapUnprotector
                 {
                     Console.WriteLine("  Key 0x" + recoveredKey.ToString("X8") +
                                       " validated! Decrypting all triggers...");
-                    int keyDecrypted = DecryptAllFreezeTriggers(data, recoveredKey, stats.Lv2Mode);
+                    int keyDecrypted = DecryptAllFreezeTriggers(data, recoveredKey, stats.FreezeMode);
                     decrypted += keyDecrypted;
                     stats.DecryptedFreezeTriggers = decrypted;
                 }
@@ -419,7 +419,7 @@ internal static partial class StarcraftMapUnprotector
                                 {
                                     Console.WriteLine("  Key 0x" + recoveredKey.ToString("X8") +
                                                       " validated! Decrypting all triggers...");
-                                    int keyDecrypted = DecryptAllFreezeTriggers(data, recoveredKey, stats.Lv2Mode);
+                                    int keyDecrypted = DecryptAllFreezeTriggers(data, recoveredKey, stats.FreezeMode);
                                     decrypted += keyDecrypted;
                                     stats.DecryptedFreezeTriggers = decrypted;
                                 }
@@ -449,9 +449,9 @@ internal static partial class StarcraftMapUnprotector
             }
         }
 
-        if (stats.Lv2Mode)
+        if (stats.FreezeMode)
         {
-            Console.WriteLine("  Lv2 mode: EUD VM triggers preserved (DisableFreezeEudTriggers skipped).");
+            Console.WriteLine("  Freeze mode: EUD VM triggers preserved (DisableFreezeEudTriggers skipped).");
         }
         else
         {
