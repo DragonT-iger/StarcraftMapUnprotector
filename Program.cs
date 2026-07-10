@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -28,15 +28,6 @@ internal static partial class StarcraftMapUnprotector
 
     // When set, print Lv2 static-restore diagnostics without writing an output file.
     private static bool Lv2DiagMode;
-
-    // Experimental Lv2 mode: clear encrypted trigger exec flags after decrypting bodies.
-    private static bool Lv2ClearExecFlags;
-
-    // Experimental Lv2 mode: disable SetDeaths-only Freeze VM/control triggers after decrypting bodies.
-    private static bool Lv2DisableVm;
-
-    // Experimental Lv2 mode: force decrypted encrypted triggers to run for player slots 1-8.
-    private static bool Lv2ForcePlayers;
 
     // When set, only dump Freeze05-decrypted TRIG records to this text file.
     private static string DumpDecryptedTriggersPath;
@@ -114,9 +105,6 @@ internal static partial class StarcraftMapUnprotector
         public bool FreezeBruteforceKey;    // enable file-only triggerKey brute-force
         public bool Lv2Mode;               // output game-playable file via static Freeze restore
         public bool Lv2DiagMode;           // print static Freeze restore diagnostics only
-        public bool Lv2ClearExecFlags;     // clear decrypted Freeze trigger exec flags to force execution
-        public bool Lv2DisableVm;          // disable Freeze VM/control triggers after decrypting bodies
-        public bool Lv2ForcePlayers;       // force decrypted Freeze triggers to execute for players 1-8
     }
 
     private sealed class MpqFileEntry
@@ -197,18 +185,6 @@ internal static partial class StarcraftMapUnprotector
                 Lv2DiagMode = true;
                 FreezeBruteforceKey = true;
             }
-            else if (args[i] == "--lv2-clear-flags")
-            {
-                Lv2ClearExecFlags = true;
-            }
-            else if (args[i] == "--lv2-disable-vm")
-            {
-                Lv2DisableVm = true;
-            }
-            else if (args[i] == "--lv2-force-players")
-            {
-                Lv2ForcePlayers = true;
-            }
             else if (args[i] == "--dump-decrypted-triggers" && i + 1 < args.Length)
             {
                 DumpDecryptedTriggersPath = Path.GetFullPath(args[++i]);
@@ -232,6 +208,15 @@ internal static partial class StarcraftMapUnprotector
             else if (args[i] == "--inject-sound" && i + 1 < args.Length)
             {
                 InjectSoundPath = Path.GetFullPath(args[++i]);
+            }
+            else if (args[i] == "-h" || args[i] == "--help")
+            {
+                argList.Add(args[i]);
+            }
+            else if (args[i].StartsWith("--", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine("Unknown option: " + args[i]);
+                return 2;
             }
             else
             {
@@ -278,11 +263,8 @@ internal static partial class StarcraftMapUnprotector
             Console.WriteLine("                        Not reliable for Lv2 because Freeze re-encrypts every frame.");
             Console.WriteLine("  --freeze-bruteforce-key");
             Console.WriteLine("                        Brute-force the final Freeze triggerKey from encrypted TRIG data.");
-            Console.WriteLine("  --lv2                 Output a game-playable (Lv2) file using static Freeze05 restore.");
-            Console.WriteLine("  --lv2-diag            Print static Freeze05 restore diagnostics without writing output.");
-            Console.WriteLine("  --lv2-clear-flags     Experimental: clear decrypted Freeze trigger exec flags to 0.");
-            Console.WriteLine("  --lv2-disable-vm      Experimental: disable SetDeaths-only Freeze VM/control triggers.");
-            Console.WriteLine("  --lv2-force-players   Experimental: set decrypted Freeze trigger player slots 1-8.");
+            Console.WriteLine("  --lv2                 Decrypt Freeze triggers and patch the original MPQ in place.");
+            Console.WriteLine("  --lv2-diag            Dry-run Freeze VM, key, defang, and MPQ readback checks.");
             Console.WriteLine("  --dump-decrypted-triggers <txt>");
             Console.WriteLine("                        Dump only Freeze05-decrypted TRIG records as text.");
             Console.WriteLine("  --report <md>         Write a human-facing map analysis report (Markdown).");
@@ -418,12 +400,11 @@ internal static partial class StarcraftMapUnprotector
                 FreezeBruteforceKey = FreezeBruteforceKey,
                 Lv2Mode = Lv2Mode,
                 Lv2DiagMode = Lv2DiagMode,
-                Lv2ClearExecFlags = Lv2ClearExecFlags,
-                Lv2DisableVm = Lv2DisableVm,
-                Lv2ForcePlayers = Lv2ForcePlayers
             };
             List<MpqFileEntry> extraFiles;
             byte[] inputBytes = File.ReadAllBytes(input);
+            if ((Lv2Mode || Lv2DiagMode) && LooksLikeChk(inputBytes))
+                throw new InvalidDataException("--lv2 and --lv2-diag require an MPQ .scx/.scm input, not raw CHK.");
 
             uint[] freezeSeedKey, freezeDestKey;
             if (DetectFreezeProtection(inputBytes, out freezeSeedKey, out freezeDestKey))
@@ -458,7 +439,7 @@ internal static partial class StarcraftMapUnprotector
                 return true;
             }
 
-            bool lv2InPlace = Lv2Mode && stats.IsFreezeProtected && !LooksLikeChk(inputBytes);
+            bool lv2InPlace = Lv2Mode && !LooksLikeChk(inputBytes);
             byte[] normalized = RawChkMode
                 ? chk
                 : lv2InPlace

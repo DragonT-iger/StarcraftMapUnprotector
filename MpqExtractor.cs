@@ -13,25 +13,28 @@ internal static partial class StarcraftMapUnprotector
     {
         extraFiles = new List<MpqFileEntry>();
 
-        try
+        if (HasPlausibleTkMpqHeader(input))
         {
-            using (var mpq = new TkMPQ(input))
+            try
             {
-                RecoverShiftedProtectedTables(input, mpq, stats);
-                PatchProtectedHashIndexes(mpq, stats);
-                extraFiles = ExtractExtraFiles(mpq, stats);
-
-                byte[] data = TryReadScenarioChkFromMpq(mpq);
-                if (data != null)
+                using (var mpq = new TkMPQ(input))
                 {
-                    return data;
+                    RecoverShiftedProtectedTables(input, mpq, stats);
+                    PatchProtectedHashIndexes(mpq, stats);
+                    extraFiles = ExtractExtraFiles(mpq, stats);
+
+                    byte[] data = TryReadScenarioChkFromMpq(mpq);
+                    if (data != null)
+                    {
+                        return data;
+                    }
                 }
             }
-        }
-        catch
-        {
-            // Protected MPQs may have intentionally corrupted headers (e.g. huge
-            // hash/block counts) that crash TkMPQ. Fall through to deep recovery.
+            catch
+            {
+                // Protected MPQs may have intentionally corrupted headers. Fall
+                // through to the managed deep-recovery path.
+            }
         }
 
         List<MpqFileEntry> recoveredExtraFiles;
@@ -44,6 +47,27 @@ internal static partial class StarcraftMapUnprotector
 
         string detail = stats.MpqDeepRecoveryDetail.Length > 0 ? " " + stats.MpqDeepRecoveryDetail : "";
         throw new InvalidDataException("Could not find a readable staredit\\scenario.chk." + detail);
+    }
+    private static bool HasPlausibleTkMpqHeader(string input)
+    {
+        try
+        {
+            byte[] header = new byte[32];
+            using (var stream = File.OpenRead(input))
+            {
+                if (stream.Length < header.Length || stream.Read(header, 0, header.Length) != header.Length)
+                    return false;
+            }
+            if (header[0] != (byte)'M' || header[1] != (byte)'P' ||
+                header[2] != (byte)'Q' || header[3] != 0x1A)
+                return false;
+            uint headerSize = BitConverter.ToUInt32(header, 4);
+            return headerSize >= 32 && headerSize <= 4096;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static byte[] TryReadScenarioChkFromMpq(TkMPQ mpq)
@@ -895,6 +919,7 @@ internal static partial class StarcraftMapUnprotector
 
         byte[] file = File.ReadAllBytes(originalPath);
         Lv2MpqPatchResult result = BuildLv2MpqPatch(file, newChk);
+        ValidateLv2MpqPatch(file, newChk, result);
         File.WriteAllBytes(output, result.File);
         Console.WriteLine("Lv2 MPQ patch           : in-place scenario.chk block");
         Console.WriteLine("  table hash/block      : 0x" + result.Tables.HashOffset.ToString("X") +
@@ -904,10 +929,28 @@ internal static partial class StarcraftMapUnprotector
         Console.WriteLine("  scenario.chk packed   : " + result.PackedLength + " / " + result.OriginalCompSize + " bytes");
     }
 
+    private static void ValidateLv2MpqPatch(byte[] originalFile, byte[] expectedChk, Lv2MpqPatchResult result)
+    {
+        if (result == null || result.File == null || result.File.Length != originalFile.Length)
+            throw new InvalidDataException("Lv2 validation failed: MPQ file size changed.");
+
+        int blockStart = result.BlockOffset;
+        int blockEnd = checked(blockStart + result.OriginalCompSize);
+        for (int i = 0; i < originalFile.Length; i++)
+        {
+            if (i >= blockStart && i < blockEnd) continue;
+            if (originalFile[i] != result.File[i])
+                throw new InvalidDataException("Lv2 validation failed: byte outside scenario.chk block changed at 0x" + i.ToString("X") + ".");
+        }
+
+        byte[] extracted = TryExtractNamedMpqFileFromRecoveredTables(result.File, "staredit\\scenario.chk");
+        if (extracted == null || extracted.Length != expectedChk.Length || !extracted.SequenceEqual(expectedChk))
+            throw new InvalidDataException("Lv2 validation failed: scenario.chk readback does not match the patched CHK.");
+    }
     private static Lv2MpqPatchResult BuildLv2MpqPatch(byte[] originalFile, byte[] newChk)
     {
         byte[] file = (byte[])originalFile.Clone();
-        MpqTableLocation tables = LocateScenarioTablesForPatch(file);
+        MpqTableLocation tables = LocateScenarioTablesForPatch(file) ?? LocateFreezeScenarioTablesForPatch(file, newChk.Length);
         if (tables == null)
         {
             throw new InvalidDataException("Lv2 MPQ patch failed: scenario.chk block table entry was not found.");
@@ -976,6 +1019,65 @@ internal static partial class StarcraftMapUnprotector
         };
     }
 
+    private static MpqTableLocation LocateFreezeScenarioTablesForPatch(byte[] file, int expectedChkSize)
+    {
+        byte[] headerBytes;
+        HashTable[] hashes;
+        BlockTable[] blocks;
+        if (!TryRecoverFreezeVmTables(file, out headerBytes, out hashes, out blocks)) return null;
+        MpqHeaderCandidate header = FindMpqHeaderCandidates(file).FirstOrDefault();
+        if (header == null) return null;
+
+        FixProtectedBlockSizes(blocks, file.Length - header.BaseOffset);
+        int index = -1;
+        foreach (HashTable hash in hashes)
+        {
+            if (!IsScenarioHash(hash)) continue;
+            int candidate = hash.BlockTable;
+            if (!IsUsableBlockIndex(candidate, blocks)) candidate &= 0x0FFFFFFF;
+            if (IsUsableBlockIndex(candidate, blocks) && IsBlockInArchive(blocks[candidate], file.Length - header.BaseOffset))
+            {
+                index = candidate;
+                break;
+            }
+        }
+        if (index < 0)
+        {
+            var matches = new List<int>();
+            for (int i = 0; i < blocks.Length; i++)
+            {
+                if (blocks[i].FileSize == (uint)expectedChkSize && IsBlockInArchive(blocks[i], file.Length - header.BaseOffset))
+                    matches.Add(i);
+            }
+            if (matches.Count == 1) index = matches[0];
+        }
+        if (index < 0 && header.BaseOffset > 0)
+        {
+            BlockTable[] adjusted = TryBuildBaseAdjustedBlocks(blocks, header.BaseOffset, file.Length - header.BaseOffset);
+            if (adjusted != null)
+            {
+                blocks = adjusted;
+                for (int i = 0; i < blocks.Length; i++)
+                {
+                    if (blocks[i].FileSize == (uint)expectedChkSize && IsBlockInArchive(blocks[i], file.Length - header.BaseOffset))
+                    {
+                        if (index >= 0) return null;
+                        index = i;
+                    }
+                }
+            }
+        }
+        if (index < 0) return null;
+        return new MpqTableLocation
+        {
+            Header = header,
+            HashOffset = 0,
+            BlockOffset = 0,
+            Hashes = hashes,
+            Blocks = blocks,
+            ScenarioBlockIndex = index
+        };
+    }
     private static MpqTableLocation LocateScenarioTablesForPatch(byte[] file)
     {
         List<MpqHeaderCandidate> headers = FindMpqHeaderCandidates(file);
@@ -1024,10 +1126,20 @@ internal static partial class StarcraftMapUnprotector
                     }
 
                     FixProtectedBlockSizes(blocks, file.Length - header.BaseOffset);
-                    int scenarioBlock = FindUsableScenarioBlock(hashes, blocks);
-                    if (scenarioBlock < 0 || !IsBlockInArchive(blocks[scenarioBlock], file.Length - header.BaseOffset))
+                    BlockTable[] selectedBlocks = blocks;
+                    int scenarioBlock = FindUsableScenarioBlock(hashes, selectedBlocks);
+                    if (scenarioBlock < 0 || !IsBlockInArchive(selectedBlocks[scenarioBlock], file.Length - header.BaseOffset))
                     {
-                        continue;
+                        selectedBlocks = TryBuildBaseAdjustedBlocks(blocks, header.BaseOffset, file.Length - header.BaseOffset);
+                        if (selectedBlocks == null)
+                        {
+                            continue;
+                        }
+                        scenarioBlock = FindUsableScenarioBlock(hashes, selectedBlocks);
+                        if (scenarioBlock < 0 || !IsBlockInArchive(selectedBlocks[scenarioBlock], file.Length - header.BaseOffset))
+                        {
+                            continue;
+                        }
                     }
 
                     return new MpqTableLocation
@@ -1036,7 +1148,7 @@ internal static partial class StarcraftMapUnprotector
                         HashOffset = hashOffset,
                         BlockOffset = blockOffset,
                         Hashes = hashes,
-                        Blocks = blocks,
+                        Blocks = selectedBlocks,
                         ScenarioBlockIndex = scenarioBlock
                     };
                 }
@@ -1524,7 +1636,8 @@ internal static partial class StarcraftMapUnprotector
             uint blockOffset = BitConverter.ToUInt32(file, offset + 20);
             int hashCount = (int)(BitConverter.ToUInt32(file, offset + 24) & 0x0FFFFFFF);
             int blockCount = (int)(BitConverter.ToUInt32(file, offset + 28) & 0x0FFFFFFF);
-            if (hashCount <= 0 || hashCount > 65536 || blockCount <= 0 || blockCount > 65536)
+            if (hashCount <= 0 || hashCount > 65536 || blockCount <= 0 || blockCount > 1048576 ||
+                (long)blockCount * 16 > file.Length)
             {
                 continue;
             }
@@ -2128,40 +2241,33 @@ internal static partial class StarcraftMapUnprotector
     {
         seedKey = null;
         destKey = null;
-        byte[] marker = Encoding.ASCII.GetBytes("freeze05 protect");
-        for (int i = data.Length - marker.Length; i >= 16; i--)
+        byte[] prefix = Encoding.ASCII.GetBytes("freeze");
+        byte[] suffix = Encoding.ASCII.GetBytes(" protect");
+        const int markerLength = 16;
+        for (int i = data.Length - markerLength; i >= 16; i--)
         {
             bool match = true;
-            for (int k = 0; k < marker.Length; k++)
+            for (int k = 0; k < prefix.Length; k++)
             {
-                if (data[i + k] != marker[k])
-                {
-                    match = false;
-                    break;
-                }
+                if (data[i + k] != prefix[k]) { match = false; break; }
             }
-
-            if (!match)
+            if (!match || data[i + 6] < (byte)'0' || data[i + 6] > (byte)'9' ||
+                data[i + 7] < (byte)'0' || data[i + 7] > (byte)'9') continue;
+            for (int k = 0; k < suffix.Length; k++)
             {
-                continue;
+                if (data[i + 8 + k] != suffix[k]) { match = false; break; }
             }
-
-            if (i + marker.Length + 16 > data.Length)
-            {
-                continue;
-            }
+            if (!match || i + markerLength + 16 > data.Length) continue;
 
             seedKey = new uint[4];
             destKey = new uint[4];
             for (int j = 0; j < 4; j++)
             {
                 seedKey[j] = BitConverter.ToUInt32(data, i - 16 + j * 4);
-                destKey[j] = BitConverter.ToUInt32(data, i + marker.Length + j * 4);
+                destKey[j] = BitConverter.ToUInt32(data, i + markerLength + j * 4);
             }
-
             return true;
         }
-
         return false;
     }
 }

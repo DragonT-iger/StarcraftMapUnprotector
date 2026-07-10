@@ -46,13 +46,24 @@ $sources = @(
     "FreezeDecryptor.cs",
     "FreezeStaticRestorer.cs",
     "FreezeKeyRecovery.cs",
+    "FreezeVmMemory.cs",
+    "FreezeTriggerVm.cs",
+    "FreezeUnfreezer.cs",
     "TriggerDump.cs",
     "Report.cs",
     "SoundInjector.cs"
 ) | ForEach-Object { Join-Path $root $_ }
 
 $exePath = Join-Path $appDir "StarcraftMapUnprotector.exe"
-$tkmpqRef = Join-Path $root "TkMPQLib.dll"
+$dependencyDirs = @(
+    $root,
+    (Join-Path $env:USERPROFILE "Downloads\StarcraftMapUnprotector-v1.2.0-win")
+)
+$tkmpqRef = $dependencyDirs | ForEach-Object { Join-Path $_ "TkMPQLib.dll" } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+$scompRef = $dependencyDirs | ForEach-Object { Join-Path $_ "SComp.dll" } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $tkmpqRef -or -not $scompRef) {
+    throw "TkMPQLib.dll and SComp.dll are required in the repo root or the v1.2.0 Downloads folder."
+}
 & $csc `
     /nologo `
     /target:exe `
@@ -67,7 +78,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "Build failed with exit code $LASTEXITCODE"
 }
 
-Copy-Item -LiteralPath (Join-Path $root "TkMPQLib.dll"), (Join-Path $root "SComp.dll"), (Join-Path $root "Unprotect-All.ps1"), (Join-Path $root "README.md") -Destination $appDir
+Copy-Item -LiteralPath $tkmpqRef, $scompRef, (Join-Path $root "Unprotect-All.ps1"), (Join-Path $root "README.md") -Destination $appDir
 New-Item -ItemType Directory -Force -Path (Join-Path $appDir "Maps\Originals"), (Join-Path $appDir "Maps\Outputs") | Out-Null
 
 if (Test-Path -LiteralPath $zipPath) {

@@ -74,58 +74,7 @@ internal static partial class StarcraftMapUnprotector
 
     private static byte[] BuildStaticLv2Chk(string input, byte[] inputBytes, byte[] chk, Stats stats)
     {
-        byte[] trigData;
-        if (!TryGetFirstChkSection(chk, "TRIG", out trigData))
-        {
-            throw new InvalidDataException("Lv2: TRIG section not found in CHK.");
-        }
-
-        if (trigData.Length % FreezeTrigSize != 0)
-        {
-            throw new InvalidDataException("Lv2: TRIG section size is not a multiple of " + FreezeTrigSize + ".");
-        }
-
-        int totalTriggers = trigData.Length / FreezeTrigSize;
-        int encryptedOffset;
-        int encryptedCount = CountEncryptedFreezeTriggers(trigData, totalTriggers, out encryptedOffset);
-
-        if (encryptedCount == 0)
-        {
-            Console.WriteLine("  Lv2: no encrypted triggers found. Returning CHK as-is.");
-            return chk;
-        }
-
-        Console.WriteLine("  Lv2: " + encryptedCount + " encrypted triggers in " + totalTriggers + " total.");
-
-        uint recoveredKey;
-        if (!TryRecoverFreezeKeyByFastBruteforce(trigData, totalTriggers, out recoveredKey))
-        {
-            throw new InvalidDataException("Lv2: triggerKey brute-force failed. Cannot proceed.");
-        }
-
-        Console.WriteLine("  Lv2: triggerKey = 0x" + recoveredKey.ToString("X8"));
-
-        int decrypted = DecryptAllFreezeTriggers(trigData, recoveredKey, false, stats.Lv2ClearExecFlags, stats.Lv2ForcePlayers);
-        stats.DecryptedFreezeTriggers = decrypted;
-        Console.WriteLine("  Lv2: decrypted " + decrypted + " triggers (" +
-                          (stats.Lv2ClearExecFlags ? "exec flags cleared to 0" : "flag restored to exec_flags only") +
-                          ").");
-        if (stats.Lv2ForcePlayers)
-        {
-            Console.WriteLine("  Lv2: forced decrypted Freeze trigger player slots P1-P8.");
-        }
-        if (stats.Lv2DisableVm)
-        {
-            int disabled = DisableFreezeControlTriggers(trigData);
-            stats.RemovedFreezeEudTriggers += disabled;
-            Console.WriteLine("  Lv2: disabled " + disabled + " SetDeaths-only Freeze VM/control triggers.");
-        }
-        else
-        {
-            Console.WriteLine("  Lv2: EUD VM triggers preserved (not disabled).");
-        }
-
-        return ReplaceTrigSection(chk, trigData);
+        return BuildMelterFreezeChk(inputBytes, chk, stats).Chk;
     }
 
     private static byte[] ReplaceTrigSection(byte[] chk, byte[] newTrigData)
@@ -166,76 +115,23 @@ internal static partial class StarcraftMapUnprotector
 
     private static void RunLv2Diagnostics(string input, byte[] inputBytes, byte[] chk, Stats stats)
     {
-        Console.WriteLine("Lv2 static restore diagnostic");
+        Console.WriteLine("Lv2 Melter-compatible dry run");
         Console.WriteLine("Input : " + input);
         Console.WriteLine("CHK   : " + chk.Length + " bytes");
+        if (stats.MpqDeepRecoveryDetail.Length > 0) Console.WriteLine("MPQ recovery: " + stats.MpqDeepRecoveryDetail);
         Console.WriteLine("Freeze05 protection: " + (stats.IsFreezeProtected ? "DETECTED" : "no"));
-
         if (stats.IsFreezeProtected)
         {
             Console.WriteLine("  marker seedKey    : " + FormatKey(stats.FreezeSeedKey));
             Console.WriteLine("  marker destKey    : " + FormatKey(stats.FreezeDestKey));
         }
 
-        byte[] trigData;
-        if (!TryGetFirstChkSection(chk, "TRIG", out trigData))
-        {
-            Console.WriteLine("TRIG section: not found");
-            return;
-        }
-
-        FreezeTriggerSummary summary = SummarizeFreezeTriggers(trigData);
-        PrintFreezeTriggerSummary(summary);
-
-        FreezeKeyFile keyFile;
-        if (TryReadFreezeKeyFile(input, stats, out keyFile))
-        {
-            Console.WriteLine("(keyfile) seedKey    : " + FormatKey(keyFile.SeedKey));
-            Console.WriteLine("(keyfile) destKey    : " + FormatKey(keyFile.DestKey));
-            Console.WriteLine("(keyfile) fileCursor : 0x" + keyFile.FileCursor.ToString("X8") +
-                              " (" + keyFile.FileCursor + ")");
-        }
-        else
-        {
-            Console.WriteLine("(keyfile)            : not readable");
-        }
-
-        if (summary.EncryptedTriggers > 0)
-        {
-            uint recoveredKey;
-            if (TryRecoverFreezeKeyByFastBruteforce((byte[])trigData.Clone(), summary.TotalTriggers, out recoveredKey))
-            {
-                Console.WriteLine("recovered triggerKey : 0x" + recoveredKey.ToString("X8"));
-
-                uint[] seedForCrypt = keyFile != null ? keyFile.SeedKey : stats.FreezeSeedKey;
-                if (seedForCrypt != null && seedForCrypt.Length >= 4)
-                {
-                    uint cryptKeyVal = ComputeCryptKeyVal(seedForCrypt);
-                    uint triggerKeyVal = FreezeUnmix2(recoveredKey, cryptKeyVal);
-                    Console.WriteLine("cryptKeyVal(seed)    : 0x" + cryptKeyVal.ToString("X8"));
-                Console.WriteLine("triggerKeyVal        : 0x" + triggerKeyVal.ToString("X8") +
-                                      " (derived by unmix2(recovered, cryptKeyVal))");
-                }
-
-                PrintDecryptedTriggerExecutionSummary(trigData, recoveredKey, stats.Lv2ClearExecFlags, stats.Lv2ForcePlayers);
-                PrintLv2KeycalcInputDiff(inputBytes, chk, trigData, recoveredKey, stats.Lv2ClearExecFlags, stats.Lv2ForcePlayers);
-
-                byte[] lv2Trig = (byte[])trigData.Clone();
-                DecryptAllFreezeTriggers(lv2Trig, recoveredKey, false, stats.Lv2ClearExecFlags, stats.Lv2ForcePlayers);
-                PrintResolvedEudWriteSummary(lv2Trig);
-            }
-            else
-            {
-                Console.WriteLine("recovered triggerKey : FAILED");
-            }
-        }
-
-        PrintMpqStructureDiagnostics(inputBytes);
-
-        Console.WriteLine("keycalc strengthened seedKey : pending static port");
-        Console.WriteLine("offset decrypt cryptKey/tKeys: pending oJumperArray + initOffsets random-r recovery");
-        Console.WriteLine("offset decrypt formula       : plainNext = (encryptedNext ^ cryptKey2), cryptKey2 += 0x" +
-                          FreezeOffsetCryptStep.ToString("X8") + " per oJumper entry");
+        FreezeUnfreezeResult result = BuildMelterFreezeChk(inputBytes, chk, stats);
+        Lv2MpqPatchResult patch = BuildLv2MpqPatch(inputBytes, result.Chk);
+        ValidateLv2MpqPatch(inputBytes, result.Chk, patch);
+        Console.WriteLine("  Lv2 in-place       : feasible (" + patch.PackedLength + "/" +
+                          patch.OriginalCompSize + " bytes)");
+        Console.WriteLine("  Dry run complete   : no output written");
     }
 
     private static void PrintDecryptedTriggerExecutionSummary(byte[] trigData, uint recoveredKey, bool clearExecFlags, bool forcePlayerSlots)

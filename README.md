@@ -2,8 +2,8 @@
 
 StarCraft 맵 파일의 보호 구조를 정리하고, 가능한 경우 `scenario.chk`를 복구해 ScmDraft 2에서 다시 열 수 있는 형태의 MPQ 맵 파일로 저장하는 도구입니다.
 
-이 도구는 ScmDraft 2 기준으로 맵을 열고 편집할 수 있게 만드는 것을 목표로 합니다. 변환된 맵이 StarCraft에서 정상적으로 실행되는 것을 보장하지는 않습니다. 
-특히 EUD 맵은 지원하지 않습니다.
+이 도구는 ScmDraft 2 기준으로 맵을 열고 편집할 수 있게 만드는 것을 목표로 합니다. 일반 변환 결과의 StarCraft 실행은 보장하지 않습니다.
+Freeze로 보호된 EUD 맵은 `--lv2` 전용 경로에서 트리거 복호화와 MPQ 구조 보존을 시도합니다.
 
 ## 오픈소스 공개 목적
 
@@ -44,7 +44,19 @@ StarcraftMapUnprotector.exe input.scx output.scx --raw-chk --no-pause
 |------|------|
 | `--no-pause` | 작업 완료 후 Enter 입력 없이 바로 종료 |
 | `--raw-chk` | CHK 정규화 없이 추출된 그대로 재패키징 |
+| `--lv2` | Freeze 감지, VM 기반 키 복구, 트리거 복호화, obf-jump 처리 후 원본 MPQ 블록에 in-place 기록 |
+| `--lv2-diag` | 같은 Freeze 파이프라인과 MPQ readback 검증을 실행하지만 출력 파일은 쓰지 않음 |
 
+## Freeze/EUD `--lv2` 모드
+
+```powershell
+StarcraftMapUnprotector.exe protected.scx output.scx --lv2 --no-pause
+StarcraftMapUnprotector.exe protected.scx --lv2-diag --no-pause
+```
+
+`--lv2`는 Freeze 런타임을 한 프레임 에뮬레이션해 `actualKey`를 복구하고, 실패하면 VM 메모리 스캔과 기존 2^32 검색을 차례로 사용합니다. STRx의 obf-jump는 정적 배열을 먼저 찾고, 보호기가 배열까지 런타임에 복원하는 변형은 VM 메모리에서 다시 찾습니다. 목적지는 실제 실행 edge 또는 `+r`/`-r` 보상 쓰기의 유일한 쌍으로 증명된 경우에만 패치합니다. VM이 안전 상한에 걸렸는데 이 증명이 없으면 멈출 수 있는 결과물을 생성하지 않습니다.
+
+출력 전에는 `scenario.chk` 크기, 원본 scenario 블록 공간, 블록 외 MPQ 바이트 불변성, 결과 CHK 재추출 일치를 검사합니다. 하나라도 실패하면 출력하지 않습니다. 이 기능은 Freeze 이전의 eudplib 소스, 변수명, 주석 또는 일반 트리거를 복원하지 않습니다.
 ## 사용 시 변질될 수 있는 정보
 
 이 프로그램은 보호 해제와 편집기에서 열 수 있는 형태로 복구하기 위해 맵 내부 데이터를 정리/복구합니다. 따라서 결과 파일은 원본과 완전히 동일한 내부 구조를 보존하지 않을 수 있습니다.
