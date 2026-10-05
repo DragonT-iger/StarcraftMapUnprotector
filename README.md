@@ -15,8 +15,14 @@ Freeze로 보호된 EUD 맵은 별도 옵션 없이 자동 감지하여 트리�
 
 Windows용 실행 파일은 GitHub Releases에서 받을 수 있습니다.
 
-- [v2.0.0 다운로드](https://github.com/DragonT-iger/StarcraftMapUnprotector/releases/tag/v2.0.0)
-- 다운로드 파일: `StarcraftMapUnprotector-v2.0.0-win.zip`
+- [v2.0.1 다운로드](https://github.com/DragonT-iger/StarcraftMapUnprotector/releases/tag/v2.0.1)
+- 다운로드 파일: `StarcraftMapUnprotector-v2.0.1-win.zip`
+
+## v2.0.1 수정 사항
+
+- v2.0.0 이후 반영된 MPQ 복구 개선을 Windows 실행 파일에 포함
+- 비정상 MPQ 헤더의 테이블 크기 검사 및 `scenario.chk` 복구 경로 보강
+- Freeze 키 복구 및 자동 복원 관련 후속 개선 포함
 
 ## v2.0.0 주요 변경 사항
 
@@ -120,6 +126,6 @@ GitHub Issues 외에도 아래 연락처로 개선사항을 보내주셔도 됩�
 직접 빌드할 때는 `TkMPQLib.dll`이 32비트 전용이라는 점에 주의해 주세요. 실행 파일도 x86으로 빌드해야 합니다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Build-Release.ps1 -Version 2.0.0
+powershell -ExecutionPolicy Bypass -File .\Build-Release.ps1 -Version 2.0.1
 .\artifacts\package\StarcraftMapUnprotector\StarcraftMapUnprotector.exe --help --no-pause
 ```
